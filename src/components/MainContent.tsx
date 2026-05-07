@@ -2552,14 +2552,13 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       return;
     }
 
-    // Clawparrot login gate: Electron users in clawparrot mode without a
-    // gateway API key get prompted to login on first send. Replaces the old
-    // hard redirect to /login at app start — users can now explore the app
-    // freely before deciding to login or switch modes.
+    // Official Anthropic API gate: if the user chose the official route but
+    // hasn't filled an API key yet, ask them to complete setup before the
+    // first send.
     const isElectronApp = !!(window as any).electronAPI?.isElectron;
     const userMode = localStorage.getItem('user_mode');
-    const hasGatewayKey = localStorage.getItem('ANTHROPIC_API_KEY') && localStorage.getItem('gateway_user');
-    if (isElectronApp && userMode !== 'selfhosted' && !hasGatewayKey) {
+    const hasOfficialKey = !!localStorage.getItem('ANTHROPIC_API_KEY');
+    if (isElectronApp && userMode !== 'selfhosted' && !hasOfficialKey) {
       pendingLoginSendRef.current = () => handleSend(effectiveText);
       setShowLoginRequired(true);
       return;
@@ -4804,20 +4803,27 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         }}
       />
 
-      {/* Clawparrot login-required modal: shown when a non-logged-in clawparrot
-          user tries to send their first message. Lets them go to login page or
-          switch to self-hosted mode in settings. */}
+      {/* API setup modal: shown when the user tries to send without configuring
+          the required credentials for the current mode. */}
       {showLoginRequired && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
           <div className="bg-claude-input border border-claude-border rounded-2xl shadow-xl w-[460px] overflow-hidden">
             <div className="px-6 pt-6 pb-4">
-              <h3 className="text-[16px] font-semibold text-claude-text mb-3">需要登录 Clawparrot 账号</h3>
+              <h3 className="text-[16px] font-semibold text-claude-text mb-3">需要先配置 API</h3>
               <p className="text-[14px] text-claude-textSecondary leading-relaxed">
-                你当前在 <span className="text-claude-text font-medium">Clawparrot</span> 模式下，需要登录 <span className="font-mono text-claude-text">clawparrot.com</span> 账号才能使用。
+                你当前使用的是
+                <span className="text-claude-text font-medium">
+                  {localStorage.getItem('user_mode') === 'selfhosted' ? ' 自定义兼容 API ' : ' 官方 Anthropic API '}
+                </span>
+                模式，但还没有配置可用的 API Key。
                 <br /><br />
-                如果你还没有账号，请先去 <span className="font-mono text-claude-text">clawparrot.com</span> 注册一个。
+                继续发送前，请先去 API 设置页填写密钥。
                 <br /><br />
-                或者你也可以在设置的 General 页面切换到 <span className="text-claude-text font-medium">自部署</span> 模式，用你自己的 API Key。
+                如果你想改成别的接入方式，也可以在设置页切换到
+                <span className="text-claude-text font-medium">
+                  {localStorage.getItem('user_mode') === 'selfhosted' ? ' 官方 Anthropic API ' : ' 自定义兼容 API '}
+                </span>
+                模式。
               </p>
             </div>
             <div className="px-5 pb-5 pt-2 flex flex-col gap-2">
@@ -4829,7 +4835,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                 }}
                 className="w-full px-5 py-2.5 text-[14px] font-medium bg-claude-text text-claude-bg hover:opacity-90 rounded-lg transition-opacity"
               >
-                去登录
+                去配置 API
               </button>
               <button
                 onClick={() => {
@@ -4852,17 +4858,23 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
             <div className="px-6 pt-6 pb-4">
               <h3 className="text-[16px] font-semibold text-claude-text mb-3">对话模型与当前模式不匹配</h3>
               <p className="text-[14px] text-claude-textSecondary leading-relaxed">
-                此对话使用的是 <span className="font-mono text-claude-text">{crossModeWarning.originalModel}</span>，
-                它属于 <span className="text-claude-text font-medium">{crossModeWarning.otherMode === 'selfhosted' ? '自部署' : 'Clawparrot'}</span> 模式下的模型。
+                这个对话当前使用的是 <span className="font-mono text-claude-text">{crossModeWarning.originalModel}</span>，
+                它属于
+                <span className="text-claude-text font-medium">
+                  {crossModeWarning.otherMode === 'selfhosted' ? ' 自定义兼容 API ' : ' 官方 Anthropic API '}
+                </span>
+                模式下的模型。
                 <br /><br />
-                你当前在 <span className="text-claude-text font-medium">{crossModeWarning.otherMode === 'selfhosted' ? 'Clawparrot' : '自部署'}</span> 模式。
-                是要继续在原模式下使用这个模型，还是切换到当前模式下的模型？
+                你当前处在
+                <span className="text-claude-text font-medium">
+                  {crossModeWarning.otherMode === 'selfhosted' ? ' 官方 Anthropic API ' : ' 自定义兼容 API '}
+                </span>
+                模式。你可以继续沿用原模式发送，也可以切换到当前模式的备选模型。
               </p>
             </div>
             <div className="px-5 pb-5 pt-2 flex flex-col gap-2">
               <button
                 onClick={() => {
-                  // Keep cross-mode: persist override, dismiss, then proceed with the pending send
                   setCrossModeOverride(crossModeWarning.convId, crossModeWarning.otherMode);
                   const fire = pendingCrossModeSendRef.current;
                   pendingCrossModeSendRef.current = null;
@@ -4873,13 +4885,11 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
               >
                 继续使用 <span className="font-mono">{crossModeWarning.originalModel}</span>
                 <div className="text-[11px] text-claude-textSecondary mt-0.5 font-normal">
-                  这次和以后都通过 {crossModeWarning.otherMode === 'selfhosted' ? '自部署' : 'Clawparrot'} 模式发送
+                  这次和以后都通过 {crossModeWarning.otherMode === 'selfhosted' ? '自定义兼容 API' : '官方 Anthropic API'} 模式发送
                 </div>
               </button>
               <button
                 onClick={async () => {
-                  // Switch model: change conv.model to the current-mode fallback, clear any
-                  // stale override, dismiss the warning, then proceed with the pending send.
                   const target = crossModeWarning.fallbackModel;
                   const convId = crossModeWarning.convId;
                   clearCrossModeOverride(convId);
@@ -4894,7 +4904,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
               >
                 切换到 <span className="font-mono">{crossModeWarning.fallbackModel}</span>
                 <div className="text-[11px] opacity-70 mt-0.5 font-normal">
-                  切完后这个对话会用当前 {crossModeWarning.otherMode === 'selfhosted' ? 'Clawparrot' : '自部署'} 模式
+                  切换后这个对话会改用当前 {crossModeWarning.otherMode === 'selfhosted' ? '官方 Anthropic API' : '自定义兼容 API'} 模式
                 </div>
               </button>
               <button

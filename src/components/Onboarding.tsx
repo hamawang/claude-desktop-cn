@@ -1,41 +1,40 @@
-import React, { useState, useEffect } from 'react';
-import { FolderOpen } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { FolderOpen, KeyRound, Monitor, ServerCog } from 'lucide-react';
 import ClaudeLogo from './ClaudeLogo';
 
 interface OnboardingProps {
   onComplete: () => void;
 }
 
+type ThemeMode = 'system' | 'light' | 'dark';
+type ApiMode = 'official' | 'selfhosted';
+
+const stepTitle = [
+  { title: '选择外观', subtitle: '先确定界面的明暗主题，后面随时可以在设置里改。' },
+  { title: '选择接入方式', subtitle: '推荐直接使用官方 Anthropic API，也支持你自己的兼容接口。' },
+  { title: '选择工作目录', subtitle: 'Claude 会优先在这里打开和分析你的项目。' },
+];
+
 const Onboarding: React.FC<OnboardingProps> = ({ onComplete }) => {
   const [step, setStep] = useState(0);
-  const [direction, setDirection] = useState(1); // 1 = forward, -1 = back
-  const [animating, setAnimating] = useState(false);
-
-  // Step 0: Theme
-  const [theme, setTheme] = useState<'system' | 'light' | 'dark'>(() => {
-    return (localStorage.getItem('theme') as any) || 'system';
-  });
-
-  // Step 1: Identity
-  const [mode, setMode] = useState<'selfhosted' | 'clawparrot' | null>(null);
-
-  // Step 2: Workspace
-  const [workspace, setWorkspace] = useState('');
+  const [theme, setTheme] = useState<ThemeMode>((localStorage.getItem('theme') as ThemeMode) || 'system');
+  const [mode, setMode] = useState<ApiMode>(
+    localStorage.getItem('user_mode') === 'selfhosted' ? 'selfhosted' : 'official',
+  );
+  const [workspace, setWorkspace] = useState(localStorage.getItem('workspace_path') || '');
 
   useEffect(() => {
-    // Fetch default workspace path from bridge-server
     fetch('http://127.0.0.1:30080/api/workspace-config')
-      .then(r => r.json())
-      .then(data => { if (data.defaultDir) setWorkspace(data.defaultDir); })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.defaultDir && !workspace) setWorkspace(data.defaultDir);
+      })
       .catch(() => {});
-    // Shrink window for onboarding
+
     const api = (window as any).electronAPI;
-    if (api?.resizeWindow) {
-      api.resizeWindow(600, 520);
-    }
+    if (api?.resizeWindow) api.resizeWindow(760, 620);
   }, []);
 
-  // Apply theme live
   useEffect(() => {
     const root = document.documentElement;
     if (theme === 'dark') root.classList.add('dark');
@@ -47,13 +46,6 @@ const Onboarding: React.FC<OnboardingProps> = ({ onComplete }) => {
     localStorage.setItem('theme', theme);
   }, [theme]);
 
-  const goTo = (next: number) => {
-    if (animating || next === step) return;
-    setDirection(next > step ? 1 : -1);
-    setAnimating(true);
-    setTimeout(() => { setStep(next); setAnimating(false); }, 300);
-  };
-
   const handleBrowse = async () => {
     const api = (window as any).electronAPI;
     if (api?.selectDirectory) {
@@ -63,310 +55,191 @@ const Onboarding: React.FC<OnboardingProps> = ({ onComplete }) => {
   };
 
   const handleFinish = () => {
-    // Restore full window size
     const api = (window as any).electronAPI;
     if (api?.resizeWindow) api.resizeWindow(1300, 780);
 
     localStorage.setItem('theme', theme);
-    localStorage.setItem('user_mode', mode || 'selfhosted');
+    localStorage.setItem('user_mode', mode === 'official' ? 'clawparrot' : 'selfhosted');
     localStorage.setItem('onboarding_done', 'true');
-    if (mode === 'selfhosted') {
-      // Self-hosted: clear any gateway keys, user will configure in settings
-      localStorage.removeItem('ANTHROPIC_API_KEY');
-      localStorage.removeItem('ANTHROPIC_BASE_URL');
+    localStorage.removeItem('cross_mode_overrides');
+
+    if (mode === 'official') {
+      localStorage.setItem('ANTHROPIC_BASE_URL', 'https://api.anthropic.com');
+      localStorage.removeItem('CUSTOM_API_KEY');
+      localStorage.removeItem('CUSTOM_BASE_URL');
+    } else {
       localStorage.removeItem('gateway_user');
-      localStorage.removeItem('auth_token');
-    } else if (mode === 'clawparrot') {
-      // Open clawparrot.com so the user can register before logging in from the app.
-      try { api?.openExternal?.('https://clawparrot.com'); } catch {}
+      localStorage.removeItem('gateway_quota');
     }
+
     if (workspace) {
       localStorage.setItem('workspace_path', workspace);
-      // Save to bridge-server config (takes effect on next launch)
       fetch('http://127.0.0.1:30080/api/workspace-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ dir: workspace }),
       }).catch(() => {});
     }
+
     onComplete();
   };
 
-  const canContinue = step === 0 ? true : step === 1 ? mode !== null : true;
-
-  // Use same static ClaudeLogo as the welcome screen
-
-  const themeCards = [
-    { id: 'system' as const, label: '跟随系统',
-      preview: (
-        <div className="w-full h-[80px] rounded-lg overflow-hidden flex">
-          <div className="flex-1 bg-[#F8F8F6] flex items-end p-2"><div className="w-full h-3 rounded bg-[#E8E5DE]"/></div>
-          <div className="flex-1 bg-[#2A2A28] flex items-end p-2"><div className="w-full h-3 rounded bg-[#3A3A38]"/></div>
-        </div>
-      )
-    },
-    { id: 'light' as const, label: 'Light',
-      preview: (
-        <div className="w-full h-[80px] rounded-lg bg-[#F8F8F6] flex flex-col justify-end p-2 gap-1.5">
-          <div className="w-[70%] h-2.5 rounded bg-[#E8E5DE]"/>
-          <div className="w-[45%] h-2.5 rounded bg-[#E8E5DE]"/>
-        </div>
-      )
-    },
-    { id: 'dark' as const, label: 'Dark',
-      preview: (
-        <div className="w-full h-[80px] rounded-lg bg-[#1A1A18] flex flex-col justify-end p-2 gap-1.5">
-          <div className="w-[70%] h-2.5 rounded bg-[#2E2E2C]"/>
-          <div className="w-[45%] h-2.5 rounded bg-[#2E2E2C]"/>
-        </div>
-      )
-    },
-  ];
+  const canContinue = step === 2 ? true : true;
 
   return (
-    <div className="fixed inset-0 z-[999] bg-claude-bg flex flex-col select-none overflow-hidden">
-      <style>{`
-        @keyframes onboarding-fade-in {
-          from { opacity: 0; transform: translateY(16px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes onboarding-fade-out-left {
-          from { opacity: 1; transform: translateX(0); }
-          to { opacity: 0; transform: translateX(-40px); }
-        }
-        @keyframes onboarding-fade-out-right {
-          from { opacity: 1; transform: translateX(0); }
-          to { opacity: 0; transform: translateX(40px); }
-        }
-        .onboarding-step-enter {
-          animation: onboarding-fade-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-        }
-        .onboarding-step-exit-left {
-          animation: onboarding-fade-out-left 0.25s cubic-bezier(0.4, 0, 1, 1) forwards;
-        }
-        .onboarding-step-exit-right {
-          animation: onboarding-fade-out-right 0.25s cubic-bezier(0.4, 0, 1, 1) forwards;
-        }
-        .onboarding-card {
-          transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-        }
-        .onboarding-card:hover {
-          transform: translateY(-2px);
-        }
-        .onboarding-card-selected {
-          box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25), 0 8px 24px -8px rgba(59, 130, 246, 0.1);
-        }
-        .onboarding-glow {
-          background: radial-gradient(ellipse 500px 350px at 50% 35%, rgba(0, 0, 0, 0.015) 0%, transparent 70%);
-        }
-        .dark .onboarding-glow {
-          background: radial-gradient(ellipse 500px 350px at 50% 35%, rgba(255, 255, 255, 0.02) 0%, transparent 70%);
-        }
-      `}</style>
-
-      {/* Title bar drag zone */}
-      <div className="absolute top-0 left-0 right-0 h-[44px] z-10" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties} />
-
-      {/* Subtle background glow */}
-      <div className="absolute inset-0 onboarding-glow pointer-events-none" />
-
-      {/* Main content */}
-      <div className="flex-1 flex flex-col items-center justify-center px-6 relative">
-        {/* Logo + title */}
-        <div className="flex flex-col items-center mb-10">
-          <div className="w-[42px] h-[42px] mb-4">
-            <ClaudeLogo color="#D97757" maxScale={0.15} />
+    <div className="fixed inset-0 z-[999] bg-claude-bg text-claude-text flex items-center justify-center px-6 py-8">
+      <div className="w-full max-w-[760px] rounded-[30px] border border-claude-border bg-white/95 dark:bg-[#1B1B1A] shadow-[0_24px_90px_rgba(0,0,0,0.18)] overflow-hidden">
+        <div className="border-b border-claude-border px-8 py-6">
+          <div className="flex items-center gap-4">
+            <div className="h-11 w-11">
+              <ClaudeLogo color="#D97757" maxScale={0.15} />
+            </div>
+            <div>
+              <div className="text-[26px] font-semibold tracking-[-0.02em]">{stepTitle[step].title}</div>
+              <div className="mt-1 text-[13px] leading-6 text-claude-textSecondary">{stepTitle[step].subtitle}</div>
+            </div>
           </div>
-          <h1
-            className="text-[15px] tracking-[0.12em] uppercase text-claude-textSecondary/60 font-medium"
-          >
-            欢迎使用 Claude Desktop
-          </h1>
         </div>
 
-        {/* Step content with animation */}
-        <div className="w-full max-w-[560px] min-h-[280px] flex items-start justify-center">
-          <div
-            key={step}
-            className={animating
-              ? (direction > 0 ? 'onboarding-step-exit-left' : 'onboarding-step-exit-right')
-              : 'onboarding-step-enter'
-            }
-            style={{ width: '100%' }}
-          >
-            {/* ───── Step 0: Theme ───── */}
-            {step === 0 && (
-              <div className="flex flex-col items-center">
-                <h2 className="text-[24px] font-semibold text-claude-text tracking-[-0.02em] mb-1.5">
-                  选择外观
-                </h2>
-                <p className="text-[14px] text-claude-textSecondary mb-7">
-                  选择界面主题，之后可以在设置中随时更改。
-                </p>
-                <div className="flex gap-3 w-full max-w-[420px]">
-                  {themeCards.map(t => (
-                    <button
-                      key={t.id}
-                      onClick={() => setTheme(t.id)}
-                      className={`onboarding-card flex-1 flex flex-col gap-2.5 p-3 rounded-xl border transition-all ${
-                        theme === t.id
-                          ? 'border-blue-500/60 onboarding-card-selected bg-claude-bg'
-                          : 'border-claude-border/60 hover:border-claude-textSecondary/20 bg-claude-bg'
-                      }`}
-                    >
-                      {t.preview}
-                      <span className={`text-[13px] font-medium text-center ${
-                        theme === t.id ? 'text-blue-500' : 'text-claude-textSecondary'
-                      }`}>
-                        {t.label}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* ───── Step 1: Identity ───── */}
-            {step === 1 && (
-              <div className="flex flex-col items-center">
-                <h2 className="text-[24px] font-semibold text-claude-text tracking-[-0.02em] mb-1.5">
-                  选择模式
-                </h2>
-                <p className="text-[14px] text-claude-textSecondary mb-7">
-                  选择 API 来源，之后可以在设置中随时切换。
-                </p>
-
-                <div className="flex gap-3 w-full">
-                  {/* Self-hosted */}
+        <div className="px-8 py-8 min-h-[360px]">
+          {step === 0 && (
+            <div className="grid grid-cols-3 gap-4">
+              {[
+                {
+                  id: 'system' as const,
+                  label: '跟随系统',
+                  icon: <Monitor size={18} />,
+                  desc: '自动跟随系统深浅色切换。',
+                },
+                {
+                  id: 'light' as const,
+                  label: '浅色',
+                  icon: <Monitor size={18} />,
+                  desc: '适合明亮背景与长时间阅读。',
+                },
+                {
+                  id: 'dark' as const,
+                  label: '深色',
+                  icon: <Monitor size={18} />,
+                  desc: '适合夜间使用与代码工作流。',
+                },
+              ].map((item) => {
+                const active = theme === item.id;
+                return (
                   <button
-                    onClick={() => setMode('selfhosted')}
-                    className={`onboarding-card flex-1 flex flex-col p-5 rounded-xl border text-left transition-all ${
-                      mode === 'selfhosted'
-                        ? 'border-blue-500/60 onboarding-card-selected bg-claude-bg'
-                        : 'border-claude-border/60 hover:border-claude-textSecondary/20 bg-claude-bg'
+                    key={item.id}
+                    onClick={() => setTheme(item.id)}
+                    className={`rounded-2xl border px-5 py-5 text-left transition-all ${
+                      active ? 'border-[#2E7CF6]/45 bg-[#2E7CF6]/10' : 'border-claude-border hover:bg-claude-hover'
                     }`}
                   >
-                    <div className={`w-9 h-9 rounded-lg flex items-center justify-center mb-3 transition-colors ${
-                      mode === 'selfhosted' ? 'bg-blue-500/10' : 'bg-claude-hover'
-                    }`}>
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={mode === 'selfhosted' ? '#3b82f6' : 'currentColor'} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="text-claude-textSecondary">
-                        <rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1" fill="currentColor"/><circle cx="6" cy="18" r="1" fill="currentColor"/>
-                      </svg>
+                    <div className={`mb-4 flex h-10 w-10 items-center justify-center rounded-xl ${active ? 'bg-[#2E7CF6]/12 text-[#2E7CF6]' : 'bg-claude-hover text-claude-textSecondary'}`}>
+                      {item.icon}
                     </div>
-                    <span className="text-[15px] font-semibold text-claude-text mb-1">自行部署</span>
-                    <span className="text-[12.5px] text-claude-textSecondary/70 leading-relaxed">
-                      使用自己的 API Key，可接入 Claude、GPT、GLM、Gemini 等任意兼容模型。
-                    </span>
+                    <div className="text-[15px] font-semibold text-claude-text">{item.label}</div>
+                    <div className="mt-2 text-[12px] leading-5 text-claude-textSecondary">{item.desc}</div>
                   </button>
+                );
+              })}
+            </div>
+          )}
 
-                  {/* Clawparrot */}
-                  <button
-                    onClick={() => setMode('clawparrot')}
-                    className={`onboarding-card flex-1 flex flex-col p-5 rounded-xl border text-left transition-all ${
-                      mode === 'clawparrot'
-                        ? 'border-blue-500/60 onboarding-card-selected bg-claude-bg'
-                        : 'border-claude-border/60 hover:border-claude-textSecondary/20 bg-claude-bg'
-                    }`}
-                  >
-                    <div className={`w-9 h-9 rounded-lg flex items-center justify-center mb-3 transition-colors ${
-                      mode === 'clawparrot' ? 'bg-blue-500/10' : 'bg-claude-hover'
-                    }`}>
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={mode === 'clawparrot' ? '#3b82f6' : 'currentColor'} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="text-claude-textSecondary">
-                        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
-                      </svg>
-                    </div>
-                    <span className="text-[15px] font-semibold text-claude-text mb-1">Clawparrot 托管</span>
-                    <span className="text-[12.5px] text-claude-textSecondary/70 leading-relaxed">
-                      由作者提供的 Claude API 服务 — 价格实惠，即开即用，无需配置。
-                    </span>
-                  </button>
+          {step === 1 && (
+            <div className="grid grid-cols-2 gap-4">
+              <button
+                onClick={() => setMode('official')}
+                className={`rounded-2xl border px-5 py-5 text-left transition-all ${
+                  mode === 'official' ? 'border-[#2E7CF6]/45 bg-[#2E7CF6]/10' : 'border-claude-border hover:bg-claude-hover'
+                }`}
+              >
+                <div className={`mb-4 flex h-10 w-10 items-center justify-center rounded-xl ${mode === 'official' ? 'bg-[#D97757]/12 text-[#D97757]' : 'bg-claude-hover text-claude-textSecondary'}`}>
+                  <KeyRound size={18} />
                 </div>
+                <div className="text-[15px] font-semibold text-claude-text">官方 Anthropic API</div>
+                <div className="mt-2 text-[12px] leading-5 text-claude-textSecondary">
+                  直接使用 Anthropic Console 生成的官方 API Key，默认走 `api.anthropic.com`。
+                </div>
+              </button>
 
-                {/* Mode hints */}
-                {mode === 'selfhosted' && (
-                  <p className="mt-5 text-[12.5px] text-claude-textSecondary/60 text-center" style={{ animation: 'onboarding-fade-in 0.3s ease' }}>
-                    进入应用后，可在设置中添加多个模型渠道和 API Key。
-                  </p>
-                )}
-                {mode === 'clawparrot' && (
-                  <p className="mt-5 text-[12.5px] text-claude-textSecondary/60 text-center" style={{ animation: 'onboarding-fade-in 0.3s ease' }}>
-                    支持 Opus 4.6、Sonnet 4.6、Haiku 4.5 等模型，继续后将跳转到 Clawparrot 网站登录并选购套餐。
-                  </p>
-                )}
+              <button
+                onClick={() => setMode('selfhosted')}
+                className={`rounded-2xl border px-5 py-5 text-left transition-all ${
+                  mode === 'selfhosted' ? 'border-[#2E7CF6]/45 bg-[#2E7CF6]/10' : 'border-claude-border hover:bg-claude-hover'
+                }`}
+              >
+                <div className={`mb-4 flex h-10 w-10 items-center justify-center rounded-xl ${mode === 'selfhosted' ? 'bg-[#2E7CF6]/12 text-[#2E7CF6]' : 'bg-claude-hover text-claude-textSecondary'}`}>
+                  <ServerCog size={18} />
+                </div>
+                <div className="text-[15px] font-semibold text-claude-text">自定义兼容 API</div>
+                <div className="mt-2 text-[12px] leading-5 text-claude-textSecondary">
+                  适合 OpenAI 兼容接口、代理地址或你自己的中转网关。
+                </div>
+              </button>
+            </div>
+          )}
+
+          {step === 2 && (
+            <div className="space-y-4">
+              <button
+                onClick={handleBrowse}
+                className="w-full rounded-2xl border border-claude-border px-5 py-5 text-left hover:bg-claude-hover transition-all"
+              >
+                <div className="flex items-center gap-4">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-claude-hover text-claude-textSecondary">
+                    <FolderOpen size={18} />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[15px] font-semibold text-claude-text">项目工作目录</div>
+                    <div className="mt-2 truncate text-[13px] text-claude-textSecondary">
+                      {workspace || '点击这里选择一个默认工作目录'}
+                    </div>
+                  </div>
+                </div>
+              </button>
+              <div className="rounded-xl border border-claude-border bg-black/[0.02] dark:bg-white/[0.02] px-4 py-3 text-[12px] leading-6 text-claude-textSecondary">
+                你之后仍然可以在 `项目`、`代码` 或设置页里重新切换工作目录，这里只是先给 Claude 一个默认入口。
               </div>
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between border-t border-claude-border px-8 py-5">
+          <div className="flex items-center gap-2">
+            {[0, 1, 2].map((dot) => (
+              <div
+                key={dot}
+                className={`h-2.5 rounded-full transition-all ${step === dot ? 'w-7 bg-[#2E7CF6]' : 'w-2.5 bg-claude-border'}`}
+              />
+            ))}
+          </div>
+
+          <div className="flex items-center gap-3">
+            {step > 0 && (
+              <button
+                onClick={() => setStep((prev) => Math.max(0, prev - 1))}
+                className="rounded-xl border border-claude-border px-4 py-2 text-[13px] text-claude-textSecondary hover:bg-claude-hover"
+              >
+                上一步
+              </button>
             )}
-
-            {/* ───── Step 2: Workspace ───── */}
-            {step === 2 && (
-              <div className="flex flex-col items-center">
-                <h2 className="text-[24px] font-semibold text-claude-text tracking-[-0.02em] mb-1.5">
-                  工作目录
-                </h2>
-                <p className="text-[14px] text-claude-textSecondary mb-7">
-                  Claude 将在此文件夹中读写项目文件。
-                </p>
-
-                <div className="w-full max-w-[440px]">
-                  <button
-                    onClick={handleBrowse}
-                    className="onboarding-card w-full flex items-center gap-3 p-4 rounded-xl border border-claude-border/60 hover:border-claude-textSecondary/20 bg-claude-bg text-left transition-all"
-                    title="点击浏览"
-                  >
-                    <div className="w-10 h-10 rounded-lg bg-claude-hover flex items-center justify-center flex-shrink-0">
-                      <FolderOpen size={18} className="text-claude-textSecondary" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-[13.5px] text-claude-text truncate">
-                        {workspace || '选择文件夹...'}
-                      </div>
-                      <div className="text-[11.5px] text-claude-textSecondary/50 mt-0.5">
-                        点击选择其他路径
-                      </div>
-                    </div>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-claude-textSecondary/40 flex-shrink-0">
-                      <polyline points="9 18 15 12 9 6"/>
-                    </svg>
-                  </button>
-                </div>
-              </div>
+            {step < 2 ? (
+              <button
+                disabled={!canContinue}
+                onClick={() => setStep((prev) => Math.min(2, prev + 1))}
+                className="rounded-xl bg-claude-text px-4 py-2 text-[13px] font-medium text-claude-bg hover:opacity-90 disabled:opacity-50"
+              >
+                下一步
+              </button>
+            ) : (
+              <button
+                onClick={handleFinish}
+                className="rounded-xl bg-[#D97757] px-5 py-2.5 text-[13px] font-medium text-white hover:opacity-90"
+              >
+                开始使用
+              </button>
             )}
           </div>
         </div>
-      </div>
-
-      {/* Bottom navigation */}
-      <div className="px-8 pb-8 flex items-center justify-between max-w-[640px] w-full mx-auto">
-        <button
-          onClick={() => goTo(step - 1)}
-          className={`text-[13.5px] text-claude-textSecondary hover:text-claude-text transition-colors py-2 px-3 rounded-lg hover:bg-claude-hover ${step === 0 ? 'invisible' : ''}`}
-        >
-          上一步
-        </button>
-
-        {/* Progress */}
-        <div className="flex items-center gap-1.5">
-          {[0, 1, 2].map(i => (
-            <button
-              key={i}
-              onClick={() => i < step && goTo(i)}
-              className={`h-1.5 rounded-full transition-all duration-500 ease-out ${
-                i === step ? 'w-6 bg-claude-text' : i < step ? 'w-1.5 bg-claude-text/25 cursor-pointer hover:bg-claude-text/40' : 'w-1.5 bg-claude-border'
-              }`}
-            />
-          ))}
-        </div>
-
-        <button
-          onClick={() => { if (step < 2) goTo(step + 1); else handleFinish(); }}
-          disabled={!canContinue}
-          className={`text-[13.5px] font-medium py-2 px-5 rounded-lg transition-all duration-200 ${
-            canContinue
-              ? 'text-white bg-[#333] dark:bg-[#e0e0e0] dark:text-[#1a1a1a] hover:bg-[#444] dark:hover:bg-[#ccc] shadow-sm hover:shadow'
-              : 'text-claude-textSecondary/40 bg-claude-border/50 cursor-not-allowed'
-          }`}
-        >
-          {step === 2 ? '开始使用' : '继续'}
-        </button>
       </div>
     </div>
   );

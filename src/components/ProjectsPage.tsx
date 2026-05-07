@@ -1,5 +1,5 @@
 ﻿import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Search, Plus, ChevronDown, ArrowLeft, MoreVertical, Star, ArrowUp, FileText, Trash, Pencil, MessageSquare, X, Upload, Check, AudioLines, ChevronRight, Archive, Github, RefreshCw, FolderOpen, Copy, GitBranch, Link2, Circle, Clock3, AlertCircle, CheckCircle2, Bot, UsersRound } from 'lucide-react';
+import { Search, Plus, ChevronDown, ArrowLeft, ArrowRight, MoreVertical, Star, ArrowUp, FileText, Trash, Pencil, MessageSquare, X, Upload, Check, AudioLines, ChevronRight, Archive, Github, RefreshCw, FolderOpen, Copy, GitBranch, Link2, Circle, Clock3, AlertCircle, CheckCircle2, Bot, UsersRound } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Paperclip, ListCollapse } from 'lucide-react';
 import { getProjects, createProject, getProject, updateProject, deleteProject, uploadProjectFile, deleteProjectFile, createProjectConversation, deleteConversation, updateConversation, getSkills, Project, ProjectFile, ProjectGithubSource, ProjectStatus, ProjectTask, ProjectTaskRunState, ProjectTaskStatus, ProjectTeamMember, ProjectTeamMemberKind, ProjectTeamMemberStatus, importProjectGithub, syncProjectGithubSource, updateProjectGithubSource, removeProjectGithubSource, deriveProjectWorkspace } from '../api';
@@ -23,10 +23,10 @@ const getConversationGroupKey = (dateValue?: string) => {
 };
 
 const getConversationGroupLabel = (key: string, isZh: boolean) => {
-  if (key === 'today') return isZh ? '浠婂ぉ' : 'Today';
-  if (key === 'yesterday') return isZh ? '鏄ㄥぉ' : 'Yesterday';
+  if (key === 'today') return isZh ? '今天' : 'Today';
+  if (key === 'yesterday') return isZh ? '昨天' : 'Yesterday';
   if (key === 'week') return isZh ? '最近 7 天' : 'Last 7 days';
-  return isZh ? '鏇存棭' : 'Older';
+  return isZh ? '更早' : 'Older';
 };
 
 const formatConversationTime = (value?: string) => {
@@ -41,8 +41,8 @@ const getTimelineDayLabel = (value: string, isZh: boolean) => {
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const startOfTarget = new Date(target.getFullYear(), target.getMonth(), target.getDate()).getTime();
   const diffDays = Math.floor((startOfToday - startOfTarget) / (24 * 60 * 60 * 1000));
-  if (diffDays <= 0) return isZh ? '浠婂ぉ' : 'Today';
-  if (diffDays === 1) return isZh ? '鏄ㄥぉ' : 'Yesterday';
+  if (diffDays <= 0) return isZh ? '今天' : 'Today';
+  if (diffDays === 1) return isZh ? '昨天' : 'Yesterday';
   return target.toLocaleDateString();
 };
 
@@ -353,14 +353,18 @@ const ProjectsPage = () => {
       hydrateProjectDocEditor(data);
       hydrateProjectMetaEditor(data);
       setGithubError(null);
-    } catch (_) { }
+    } catch (_) {
+      setCurrentProject(null);
+    }
   }, [hydrateProjectDocEditor, hydrateProjectMetaEditor]);
 
   useEffect(() => {
     const projectId = new URLSearchParams(location.search).get('project');
     if (projectId) {
       loadProject(projectId);
+      return;
     }
+    setCurrentProject(null);
   }, [location.search, loadProject]);
 
   useEffect(() => {
@@ -630,9 +634,9 @@ const ProjectsPage = () => {
   };
 
   const filteredProjects = useMemo(() => {
-    const filtered = projects.filter(p =>
-      p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      p.description.toLowerCase().includes(searchQuery.toLowerCase())
+  const filtered = projects.filter(p =>
+      String(p.name || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+      String(p.description || '').toLowerCase().includes(searchQuery.toLowerCase())
     );
     return [...filtered].sort((a, b) => {
       if (sortBy === 'created') return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
@@ -656,45 +660,6 @@ const ProjectsPage = () => {
     });
     return buckets.filter((bucket) => bucket.items.length > 0);
   }, [currentProject, isZh]);
-
-  const projectActivityItems = useMemo(() => {
-    if (!currentProject) return [];
-    const parsedDoc = parseProjectDocument(currentProject.instructions || currentProject.description || '');
-    const projectDoc = currentProject.instructions || currentProject.description;
-    const projectSummary = projectDoc ? [{
-      id: `project-${currentProject.id}`,
-      type: 'project',
-      title: isZh ? '项目文档已更新' : 'Project doc updated',
-      detail: parsedDoc.goals || parsedDoc.overview || (isZh ? '继续补目标、约束和常用命令。' : 'Keep enriching goals, constraints, and commands.'),
-      at: currentProject.updated_at,
-    }] : [];
-    const conversations = (currentProject.conversations || []).map((conv: any) => ({
-      id: `conv-${conv.id}`,
-      type: 'chat',
-      title: conv.title || (isZh ? '未命名聊天' : 'Untitled chat'),
-      detail: buildProjectConversationDetail(conv),
-      at: conv.created_at,
-    }));
-    const files = (currentProject.files || []).map((file: ProjectFile) => ({
-      id: `file-${file.id}`,
-      type: 'file',
-      title: file.file_name,
-      detail: file.source_type === 'github' ? 'GitHub file' : (isZh ? '项目文件' : 'Project file'),
-      at: file.created_at,
-    }));
-    const sources = (currentProject.github_sources || []).map((source: ProjectGithubSource) => ({
-      id: `source-${source.id}`,
-      type: 'github',
-      title: source.repo_full_name,
-      detail: isZh ? `同步到 ${source.ref}` : `Synced to ${source.ref}`,
-      at: source.last_synced_at || source.added_at,
-    }));
-
-    return [...projectSummary, ...conversations, ...files, ...sources]
-      .filter((item) => item.at)
-      .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
-      .slice(0, 8);
-  }, [buildProjectConversationDetail, currentProject, isZh]);
 
   const currentProjectDoc = useMemo(
     () => parseProjectDocument(currentProject?.instructions || currentProject?.description || ''),
@@ -769,6 +734,45 @@ const ProjectsPage = () => {
     }));
   }, [currentProjectTasks, currentProjectTeamMembers]);
 
+  const projectActivityItems = useMemo(() => {
+    if (!currentProject) return [];
+    const parsedDoc = parseProjectDocument(currentProject.instructions || currentProject.description || '');
+    const projectDoc = currentProject.instructions || currentProject.description;
+    const projectSummary = projectDoc ? [{
+      id: `project-${currentProject.id}`,
+      type: 'project',
+      title: isZh ? '项目文档已更新' : 'Project doc updated',
+      detail: parsedDoc.goals || parsedDoc.overview || (isZh ? '继续补目标、约束和常用命令。' : 'Keep enriching goals, constraints, and commands.'),
+      at: currentProject.updated_at,
+    }] : [];
+    const conversations = (currentProject.conversations || []).map((conv: any) => ({
+      id: `conv-${conv.id}`,
+      type: 'chat',
+      title: conv.title || (isZh ? '未命名聊天' : 'Untitled chat'),
+      detail: buildProjectConversationDetail(conv),
+      at: conv.created_at,
+    }));
+    const files = (currentProject.files || []).map((file: ProjectFile) => ({
+      id: `file-${file.id}`,
+      type: 'file',
+      title: file.file_name,
+      detail: file.source_type === 'github' ? 'GitHub file' : (isZh ? '项目文件' : 'Project file'),
+      at: file.created_at,
+    }));
+    const sources = (currentProject.github_sources || []).map((source: ProjectGithubSource) => ({
+      id: `source-${source.id}`,
+      type: 'github',
+      title: source.repo_full_name,
+      detail: isZh ? `同步到 ${source.ref}` : `Synced to ${source.ref}`,
+      at: source.last_synced_at || source.added_at,
+    }));
+
+    return [...projectSummary, ...conversations, ...files, ...sources]
+      .filter((item) => item.at)
+      .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
+      .slice(0, 8);
+  }, [buildProjectConversationDetail, currentProject, isZh]);
+
   const enhancedProjectActivityItems = useMemo(() => {
     if (!currentProject) return [];
     const parsedDoc = parseProjectDocument(currentProject.instructions || currentProject.description || '');
@@ -842,10 +846,10 @@ const ProjectsPage = () => {
   const projectDocSections = useMemo(() => {
     const sectionLabels: Record<keyof ProjectDocDraft, string> = {
       overview: isZh ? '项目概览' : 'Overview',
-      goals: isZh ? '鐩爣' : 'Goals',
+      goals: isZh ? '目标' : 'Goals',
       stack: isZh ? '技术栈' : 'Tech stack',
-      constraints: isZh ? '绾︽潫' : 'Constraints',
-      commands: isZh ? '甯哥敤鍛戒护' : 'Commands',
+      constraints: isZh ? '约束' : 'Constraints',
+      commands: isZh ? '常用命令' : 'Commands',
       notes: isZh ? '补充备注' : 'Notes',
     };
 
@@ -1173,7 +1177,7 @@ const ProjectsPage = () => {
     }
   };
 
-  // 鈺愨晲鈺?Project Detail View 鈺愨晲鈺?
+  // Project Detail View
   if (currentProject) {
     return (
       <div className="flex-1 h-full bg-claude-bg overflow-y-auto">
@@ -2057,7 +2061,7 @@ const ProjectsPage = () => {
                           />
                         </div>
                         <div>
-                          <label className="mb-2 block text-[13px] font-medium text-claude-textSecondary">{isZh ? '甯哥敤鍛戒护' : 'Common commands'}</label>
+                          <label className="mb-2 block text-[13px] font-medium text-claude-textSecondary">{isZh ? '常用命令' : 'Common commands'}</label>
                           <textarea
                             value={projectDocDraft.commands}
                             onChange={e => updateProjectDocField('commands', e.target.value)}
@@ -2091,7 +2095,7 @@ const ProjectsPage = () => {
                           }}
                           className="px-4 py-2 text-[14px] font-medium text-claude-text hover:bg-white/5 border border-transparent hover:border-claude-border rounded-xl transition-all"
                         >
-                          {isZh ? '鍙栨秷' : 'Cancel'}
+                    {isZh ? '取消' : 'Cancel'}
                         </button>
                         <button
                           onClick={handleSaveInstructions}
@@ -2132,7 +2136,7 @@ const ProjectsPage = () => {
                           onClick={() => { setEditingInstructions(false); setInstructionsText(currentProject.instructions || ''); }}
                           className="px-4 py-2 text-[14px] font-medium text-claude-text hover:bg-white/5 border border-transparent hover:border-claude-border rounded-xl transition-all"
                         >
-                          {isZh ? '鍙栨秷' : 'Cancel'}
+                    {isZh ? '取消' : 'Cancel'}
                         </button>
                         <button
                           onClick={handleSaveInstructions}
@@ -2314,7 +2318,7 @@ const ProjectsPage = () => {
     );
   }
 
-  // 鈺愨晲鈺?Create View 鈺愨晲鈺?
+  // Create View
   if (isCreating) {
     return (
       <div className="flex-1 h-full bg-claude-bg overflow-y-auto">
@@ -2377,7 +2381,7 @@ const ProjectsPage = () => {
     );
   }
 
-  // 鈺愨晲鈺?Projects List View 鈺愨晲鈺?
+  // Projects List View
   return (
     <div className="flex-1 h-full bg-claude-bg overflow-y-auto">
       <div className="max-w-[800px] mx-auto px-8 py-12">

@@ -805,21 +805,9 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
                   {userUser?.display_name || userUser?.full_name || userUser?.nickname || '用户'}
                 </div>
                 {localStorage.getItem('user_mode') === 'selfhosted' ? (
-                  <div className="text-[13px] text-claude-textSecondary mt-1 leading-tight">Self-hosted</div>
-                ) : usageData && usageData.token_quota > 0 ? (
-                  <div className="mt-1.5 mr-3">
-                    <div className="h-1 w-full rounded-full bg-claude-hover overflow-hidden">
-                      <div
-                        className="h-full bg-neutral-700 dark:bg-neutral-300 transition-[width] duration-300"
-                        style={{ width: `${Math.min(100, (usageData.token_used / usageData.token_quota) * 100)}%` }}
-                      />
-                    </div>
-                    <div className="text-[10px] text-claude-textSecondary mt-1 leading-none tabular-nums">
-                      ${usageData.token_used.toFixed(2)} / ${usageData.token_quota.toFixed(2)}
-                    </div>
-                  </div>
+                  <div className="text-[13px] text-claude-textSecondary mt-1 leading-tight">自定义兼容 API</div>
                 ) : (
-                  <div className="text-[13px] text-claude-textSecondary mt-1 leading-tight">{planLabel}</div>
+                  <div className="text-[13px] text-claude-textSecondary mt-1 leading-tight">官方 Anthropic API</div>
                 )}
               </div>
               <ChevronUp size={16} className="text-claude-textSecondary shrink-0 ml-1" />
@@ -845,30 +833,12 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
                   <Settings size={16} className="text-claude-textSecondary" />
                   设置
                 </button>
-                {localStorage.getItem('user_mode') !== 'selfhosted' && (
-                  <button
-                    className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
-                    onClick={() => { setShowUserMenu(false); onOpenUpgrade?.(); }}
-                  >
-                    <CreditCard size={16} className="text-claude-textSecondary" />
-                    套餐购买
-                  </button>
-                )}
-                {isAdmin && localStorage.getItem('user_mode') !== 'selfhosted' && (
-                  <button
-                    className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
-                    onClick={() => { setShowUserMenu(false); navigate('/admin'); }}
-                  >
-                    <Shield size={16} className="text-claude-textSecondary" />
-                    管理面板
-                  </button>
-                )}
                 <button
                   onClick={() => { setShowUserMenu(false); setShowHelpModal(true); }}
                   className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
                 >
                   <HelpCircle size={16} className="text-claude-textSecondary" />
-                  售后支持
+                  帮助与支持
                 </button>
               </div>
               <div className="h-[1px] bg-claude-border mx-3" />

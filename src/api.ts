@@ -108,37 +108,17 @@ export async function login(email: string, password: string) {
   return res.json();
 }
 
-// Gateway login for Electron app — authenticates via US gateway, returns API key for Claude Code SDK
+// Legacy hosted-gateway login. The desktop app now uses direct API-key setup,
+// so this helper stays only as a defensive fallback.
 export async function gatewayLogin(email: string, password: string) {
-  const res = await fetch(`${GATEWAY_BASE}/gateway/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || '登录失败');
-  }
-  const data = await res.json();
-  if (data.api_key) {
-    localStorage.setItem('ANTHROPIC_API_KEY', data.api_key);
-    localStorage.setItem('ANTHROPIC_BASE_URL', GATEWAY_BASE);
-    localStorage.setItem('gateway_user', JSON.stringify(data.user || {}));
-    localStorage.setItem('gateway_quota', JSON.stringify(data.quota || {}));
-    // Also store Chengdu JWT + user in standard keys so profile/usage APIs work
-    if (data.chengdu_token) {
-      localStorage.setItem('auth_token', data.chengdu_token);
-    }
-    if (data.user) {
-      localStorage.setItem('user', JSON.stringify(data.user));
-    }
-  }
-  return data;
+  void email;
+  void password;
+  throw new Error('当前版本不再支持第三方托管登录，请改用官方 Anthropic API Key 或自定义兼容 API。');
 }
 
-// Check if user is logged in via gateway
+// Check whether the official API mode has been configured.
 export function isGatewayLoggedIn(): boolean {
-  return !!(localStorage.getItem('ANTHROPIC_API_KEY') && localStorage.getItem('gateway_user'));
+  return !!localStorage.getItem('ANTHROPIC_API_KEY');
 }
 
 // Gateway logout
@@ -149,15 +129,9 @@ export function gatewayLogout() {
   localStorage.removeItem('gateway_quota');
 }
 
-// Get gateway usage status
+// Legacy hosted-gateway usage no longer applies to direct official API mode.
 export async function getGatewayUsage() {
-  const key = localStorage.getItem('ANTHROPIC_API_KEY');
-  if (!key) return null;
-  const res = await fetch(`${GATEWAY_BASE}/gateway/usage`, {
-    headers: { 'x-api-key': key },
-  });
-  if (!res.ok) return null;
-  return res.json();
+  return null;
 }
 
 export async function forgotPassword(email: string) {

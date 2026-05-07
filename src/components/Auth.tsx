@@ -1,261 +1,240 @@
-import React, { useState, useEffect } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft } from 'lucide-react';
-import { login, register, sendCode, forgotPassword, resetPassword, gatewayLogin } from '../api';
+import { ArrowLeft, ExternalLink, KeyRound, ServerCog } from 'lucide-react';
 
-type View = 'login' | 'register' | 'verify' | 'forgot' | 'reset';
+type ApiMode = 'official' | 'selfhosted';
+
+const OFFICIAL_BASE_URL = 'https://api.anthropic.com';
+
+const cardClass =
+  'rounded-2xl border px-4 py-4 text-left transition-all hover:bg-black/[0.03] dark:hover:bg-white/[0.03]';
+
+const inputClass =
+  'w-full rounded-xl border border-claude-border bg-claude-bg px-4 py-3 text-[14px] text-claude-text outline-none focus:border-[#2E7CF6]/50';
 
 const Auth = () => {
   const navigate = useNavigate();
-  const [view, setView] = useState<View>('login');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [nickname, setNickname] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [code, setCode] = useState('');
-  const [error, setError] = useState('');
+  const initialMode = (localStorage.getItem('user_mode') === 'selfhosted' ? 'selfhosted' : 'official') as ApiMode;
+  const [mode, setMode] = useState<ApiMode>(initialMode);
+  const [officialKey, setOfficialKey] = useState(localStorage.getItem('ANTHROPIC_API_KEY') || '');
+  const [customBaseUrl, setCustomBaseUrl] = useState(localStorage.getItem('CUSTOM_BASE_URL') || '');
+  const [customKey, setCustomKey] = useState(localStorage.getItem('CUSTOM_API_KEY') || '');
   const [message, setMessage] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [countdown, setCountdown] = useState(0);
+  const [error, setError] = useState('');
 
-  useEffect(() => {
-    if (countdown <= 0) return;
-    const timer = setTimeout(() => setCountdown(countdown - 1), 1000);
-    return () => clearTimeout(timer);
-  }, [countdown]);
-
-  const getPasswordStrength = (pwd: string): { level: string; color: string; width: string } => {
-    if (!pwd) return { level: '', color: '', width: '0%' };
-    const hasLetter = /[a-zA-Z]/.test(pwd);
-    const hasNumber = /[0-9]/.test(pwd);
-    const hasSpecial = /[^a-zA-Z0-9]/.test(pwd);
-    const long = pwd.length >= 12;
-    if (pwd.length < 8 || !hasLetter || !hasNumber) return { level: '弱', color: '#EF4444', width: '33%' };
-    if (long && hasSpecial) return { level: '强', color: '#22C55E', width: '100%' };
-    return { level: '中', color: '#F59E0B', width: '66%' };
-  };
-
-  const showStrength = (view === 'register' || view === 'reset') && password;
-  const strength = showStrength ? getPasswordStrength(password) : null;
-
-  const isElectron = !!(window as any).electronAPI?.isElectron;
-
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError(''); setLoading(true);
-    try {
-      if (isElectron) {
-        // Electron app: login via US gateway, get API key for Claude Code SDK
-        const data = await gatewayLogin(email, password);
-        if (data.api_key) {
-          window.location.hash = '#/'; window.location.reload();
-        } else {
-          setError('登录成功但未获取到 API Key');
-        }
-      } else {
-        // Web: login via Chengdu backend
-        const data = await login(email, password);
-        if (data.token) {
-          localStorage.setItem('auth_token', data.token);
-          localStorage.setItem('user', JSON.stringify(data.user));
-          window.location.hash = '#/'; window.location.reload();
-        }
-      }
-    } catch (err: any) {
-      setError(err.message || '登录失败');
-    } finally { setLoading(false); }
-  };
-
-  const handleSendCode = async () => {
-    if (countdown > 0) return;
-    setError(''); setLoading(true);
-    try {
-      await sendCode(email);
-      setCountdown(60);
-      setView('verify');
-      setMessage('验证码已发送到您的邮箱');
-    } catch (err: any) {
-      setError(err.message || '发送失败');
-    } finally { setLoading(false); }
-  };
-
-  const handleRegisterStep1 = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (password.length < 8 || !/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) {
-      setError('密码至少 8 位，需包含字母和数字');
-      return;
-    }
-    if (password !== confirmPassword) {
-      setError('两次输入的密码不一致');
-      return;
-    }
-    await handleSendCode();
-  };
-
-  const handleRegisterStep2 = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError(''); setLoading(true);
-    try {
-      const data = await register(email, password, nickname, code);
-      if (data.token) {
-        localStorage.setItem('auth_token', data.token);
-        localStorage.setItem('user', JSON.stringify(data.user));
-        window.location.hash = '#/'; window.location.reload();
-      }
-    } catch (err: any) {
-      setError(err.message || '注册失败');
-    } finally { setLoading(false); }
-  };
-
-  const handleForgotPassword = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError(''); setLoading(true);
-    try {
-      const data = await forgotPassword(email);
-      setMessage(data.message || '验证码已发送');
-      setCountdown(60);
-      setView('reset');
-    } catch (err: any) {
-      setError(err.message || '发送失败');
-    } finally { setLoading(false); }
-  };
-
-  const handleResetPassword = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (password.length < 8 || !/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) {
-      setError('密码至少 8 位，需包含字母和数字');
-      return;
-    }
-    if (password !== confirmPassword) {
-      setError('两次输入的密码不一致');
-      return;
-    }
-    setError(''); setLoading(true);
-    try {
-      await resetPassword(email, code, password);
-      setMessage('密码重置成功，请登录');
-      setView('login');
-      setPassword(''); setCode('');
-    } catch (err: any) {
-      setError(err.message || '重置失败');
-    } finally { setLoading(false); }
-  };
-
-  const switchView = (v: View) => {
-    setView(v); setError(''); setMessage(''); setCode(''); setConfirmPassword('');
-  };
-
-  const inputClass = "w-full px-3 py-2 border border-[#E5E5E5] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#CC7C5E] focus:border-transparent transition-all";
-  const btnClass = "w-full py-2.5 bg-[#CC7C5E] hover:bg-[#B96B4E] text-white font-medium rounded-lg transition-colors disabled:opacity-70 disabled:cursor-not-allowed";
-
-  const renderPasswordField = () => (
-    <>
-      <div>
-        <label className="block text-sm font-medium text-[#393939] mb-1">密码</label>
-        <input type="password" required value={password} onChange={(e) => setPassword(e.target.value)}
-          className={inputClass} placeholder="••••••••" />
-        {strength && (
-          <div className="mt-2">
-            <div className="h-1.5 w-full bg-gray-200 rounded-full overflow-hidden">
-              <div className="h-full rounded-full transition-all duration-300"
-                style={{ width: strength.width, backgroundColor: strength.color }} />
-            </div>
-            <p className="text-xs mt-1" style={{ color: strength.color }}>
-              密码强度：{strength.level}
-              {strength.level === '弱' && '（至少8位，需包含字母和数字）'}
-            </p>
-          </div>
-        )}
-      </div>
-      <div>
-        <label className="block text-sm font-medium text-[#393939] mb-1">确认密码</label>
-        <input type="password" required value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)}
-          className={inputClass} placeholder="再次输入密码" />
-        {confirmPassword && password !== confirmPassword && (
-          <p className="text-xs mt-1 text-red-500">两次输入的密码不一致</p>
-        )}
-      </div>
-    </>
+  const modeTitle = useMemo(
+    () => (mode === 'official' ? '官方 Anthropic API' : '自定义兼容 API'),
+    [mode],
   );
 
-  const userMode = localStorage.getItem('user_mode');
-  const showClawparrotHint = isElectron && userMode === 'clawparrot';
-
-  const handleSkipLogin = () => {
-    // 切换到自部署模式, 不走 clawparrot 网关. 用户之后可以在 Settings → Models 里配置自己的 provider.
-    localStorage.setItem('user_mode', 'selfhosted');
-    localStorage.removeItem('ANTHROPIC_API_KEY');
-    localStorage.removeItem('ANTHROPIC_BASE_URL');
-    localStorage.removeItem('gateway_user');
-    localStorage.removeItem('auth_token');
-    window.location.hash = '#/';
-    window.location.reload();
+  const handleBack = () => {
+    if (window.history.length > 1) navigate(-1);
+    else navigate('/');
   };
 
-  const openClawparrot = () => {
-    try { (window as any).electronAPI?.openExternal?.('https://clawparrot.com'); } catch {}
+  const saveOfficial = () => {
+    if (!officialKey.trim()) {
+      setError('请先填写官方 Anthropic API Key。');
+      setMessage('');
+      return;
+    }
+    localStorage.setItem('user_mode', 'clawparrot');
+    localStorage.setItem('ANTHROPIC_API_KEY', officialKey.trim());
+    localStorage.setItem('ANTHROPIC_BASE_URL', OFFICIAL_BASE_URL);
+    localStorage.removeItem('CUSTOM_API_KEY');
+    localStorage.removeItem('CUSTOM_BASE_URL');
+    localStorage.removeItem('gateway_user');
+    localStorage.removeItem('gateway_quota');
+    localStorage.removeItem('cross_mode_overrides');
+    setError('');
+    setMessage('已切换到官方 Anthropic API。');
+    setTimeout(() => {
+      window.location.hash = '#/';
+      window.location.reload();
+    }, 250);
+  };
+
+  const saveCustom = () => {
+    if (!customBaseUrl.trim() || !customKey.trim()) {
+      setError('请填写兼容接口的 Base URL 和 API Key。');
+      setMessage('');
+      return;
+    }
+    localStorage.setItem('user_mode', 'selfhosted');
+    localStorage.setItem('CUSTOM_BASE_URL', customBaseUrl.trim());
+    localStorage.setItem('CUSTOM_API_KEY', customKey.trim());
+    localStorage.removeItem('gateway_user');
+    localStorage.removeItem('gateway_quota');
+    localStorage.removeItem('cross_mode_overrides');
+    setError('');
+    setMessage('已切换到自定义兼容 API。');
+    setTimeout(() => {
+      window.location.hash = '#/';
+      window.location.reload();
+    }, 250);
+  };
+
+  const openAnthropicConsole = () => {
+    try {
+      (window as any).electronAPI?.openExternal?.('https://console.anthropic.com/settings/keys');
+    } catch {
+      window.open('https://console.anthropic.com/settings/keys', '_blank', 'noopener,noreferrer');
+    }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[#F8F8F6] font-sans relative">
-      {/* Back button — lets users leave the login page without logging in.
-          Uses navigate(-1) if there's history, otherwise navigates to / */}
+    <div className="min-h-screen bg-[#F8F8F6] dark:bg-[#141413] text-claude-text flex items-center justify-center px-6 py-10">
       <button
-        onClick={() => {
-          if (window.history.length > 1) navigate(-1);
-          else navigate('/');
-        }}
-        className="absolute top-6 left-6 flex items-center gap-1.5 px-3 py-1.5 text-sm text-[#747474] hover:text-[#222] hover:bg-black/5 rounded-md transition-colors"
+        onClick={handleBack}
+        className="absolute top-6 left-6 flex items-center gap-1.5 rounded-lg px-3 py-2 text-[13px] text-claude-textSecondary hover:bg-black/5 dark:hover:bg-white/5"
       >
         <ArrowLeft size={16} />
         返回
       </button>
-      {showClawparrotHint && (
-        <button
-          onClick={handleSkipLogin}
-          className="absolute top-14 right-6 px-3 py-1.5 text-sm text-[#747474] hover:text-[#222] hover:bg-black/5 rounded-md transition-colors"
-        >
-          跳过登录
-        </button>
-      )}
-      <div className="w-full max-w-md p-8 bg-white rounded-2xl shadow-sm border border-[#E5E5E5]">
-        <div className="text-center mb-8">
-          <h1 className="text-3xl font-serif-claude text-[#222] mb-2">Claude</h1>
-          <p className="text-[#747474]">欢迎回来</p>
+
+      <div className="w-full max-w-[860px] rounded-[28px] border border-claude-border bg-white/90 dark:bg-[#1B1B1A] shadow-[0_24px_80px_rgba(0,0,0,0.12)] overflow-hidden">
+        <div className="border-b border-claude-border px-8 py-7">
+          <div className="text-[32px] font-serif-claude text-[#222] dark:text-white">Claude</div>
+          <div className="mt-2 text-[14px] leading-6 text-claude-textSecondary">
+            这里不再使用第三方账号登录。你可以直接接入官方 Anthropic API，或者填写其他兼容接口。
+          </div>
         </div>
 
-        {showClawparrotHint && view === 'login' && (
-          <div className="mb-4 p-3 bg-[#F5F0E9] border border-[#E5D9C8] text-[#6B4E3D] text-[13px] rounded-lg leading-relaxed">
-            首次使用请先在{' '}
-            <button onClick={openClawparrot} className="text-[#CC7C5E] underline hover:text-[#B96B4E] font-medium">
-              clawparrot.com
-            </button>
-            {' '}用邮箱注册账号，然后回到这里登录。右上角可跳过登录、改用自部署模式。
+        <div className="grid grid-cols-[280px_1fr] gap-0">
+          <div className="border-r border-claude-border bg-black/[0.02] dark:bg-white/[0.02] px-6 py-6">
+            <div className="text-[13px] font-medium text-claude-textSecondary mb-3">接入方式</div>
+            <div className="space-y-3">
+              <button
+                onClick={() => setMode('official')}
+                className={`${cardClass} ${mode === 'official' ? 'border-[#2E7CF6]/45 bg-[#2E7CF6]/10' : 'border-claude-border bg-transparent'}`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#D97757]/10 text-[#D97757]">
+                    <KeyRound size={18} />
+                  </div>
+                  <div>
+                    <div className="text-[15px] font-semibold text-claude-text">官方 Anthropic API</div>
+                    <div className="mt-1 text-[12px] leading-5 text-claude-textSecondary">
+                      使用 Anthropic Console 生成的 API Key，默认连接官方地址。
+                    </div>
+                  </div>
+                </div>
+              </button>
+
+              <button
+                onClick={() => setMode('selfhosted')}
+                className={`${cardClass} ${mode === 'selfhosted' ? 'border-[#2E7CF6]/45 bg-[#2E7CF6]/10' : 'border-claude-border bg-transparent'}`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-claude-hover text-claude-textSecondary">
+                    <ServerCog size={18} />
+                  </div>
+                  <div>
+                    <div className="text-[15px] font-semibold text-claude-text">自定义兼容 API</div>
+                    <div className="mt-1 text-[12px] leading-5 text-claude-textSecondary">
+                      适合 OpenAI 兼容、代理网关或你自己的中转接口。
+                    </div>
+                  </div>
+                </div>
+              </button>
+            </div>
           </div>
-        )}
 
-        {error && <div className="mb-4 p-3 bg-red-50 text-red-600 text-sm rounded-lg">{error}</div>}
-        {message && <div className="mb-4 p-3 bg-green-50 text-green-600 text-sm rounded-lg">{message}</div>}
-
-        {/* 登录 */}
-        {view === 'login' && (
-          <form onSubmit={handleLogin} className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-[#393939] mb-1">邮箱</label>
-              <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)}
-                className={inputClass} placeholder="name@example.com" />
+          <div className="px-8 py-7">
+            <div className="mb-6">
+              <div className="text-[20px] font-semibold text-claude-text">{modeTitle}</div>
+              <div className="mt-2 text-[13px] leading-6 text-claude-textSecondary">
+                {mode === 'official'
+                  ? '推荐优先使用官方 Anthropic API。你只需要在官方 Console 里创建 API Key，再填回这里。'
+                  : '如果你使用自己的兼容接口，就在这里填写 Base URL 和 API Key。'}
+              </div>
             </div>
-            <div>
-              <label className="block text-sm font-medium text-[#393939] mb-1">密码</label>
-              <input type="password" required value={password} onChange={(e) => setPassword(e.target.value)}
-                className={inputClass} placeholder="••••••••" />
-            </div>
-            <button type="submit" disabled={loading} className={btnClass}>
-              {loading ? '登录中...' : '登录'}
-            </button>
-          </form>
-        )}
 
+            {error && <div className="mb-4 rounded-xl bg-[#C6613F]/10 px-4 py-3 text-[13px] text-[#C6613F]">{error}</div>}
+            {message && <div className="mb-4 rounded-xl bg-[#2E7CF6]/10 px-4 py-3 text-[13px] text-[#2E7CF6]">{message}</div>}
+
+            {mode === 'official' ? (
+              <div className="space-y-4">
+                <div className="rounded-2xl border border-claude-border bg-claude-bg px-4 py-4">
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <div className="text-[14px] font-medium text-claude-text">Anthropic Console</div>
+                      <div className="mt-1 text-[12px] leading-5 text-claude-textSecondary">
+                        官方密钥管理页：`console.anthropic.com/settings/keys`
+                      </div>
+                    </div>
+                    <button
+                      onClick={openAnthropicConsole}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-claude-border px-3 py-2 text-[12px] text-claude-text hover:bg-claude-hover"
+                    >
+                      打开官网
+                      <ExternalLink size={13} />
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <div className="mb-1.5 text-[13px] text-claude-textSecondary">官方 API Key</div>
+                  <input
+                    value={officialKey}
+                    onChange={(e) => setOfficialKey(e.target.value)}
+                    className={inputClass}
+                    placeholder="sk-ant-..."
+                    spellCheck={false}
+                  />
+                </div>
+                <div>
+                  <div className="mb-1.5 text-[13px] text-claude-textSecondary">官方 Base URL</div>
+                  <input value={OFFICIAL_BASE_URL} readOnly className={`${inputClass} opacity-80`} />
+                </div>
+                <div className="rounded-xl border border-claude-border bg-black/[0.02] dark:bg-white/[0.02] px-4 py-3 text-[12px] leading-6 text-claude-textSecondary">
+                  客户端会直接使用官方 Anthropic API，不再跳转第三方站点，也不会要求单独注册第三方账号。
+                </div>
+                <div className="flex justify-end">
+                  <button
+                    onClick={saveOfficial}
+                    className="rounded-xl bg-[#D97757] px-5 py-2.5 text-[14px] font-medium text-white hover:opacity-90"
+                  >
+                    保存并进入应用
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div>
+                  <div className="mb-1.5 text-[13px] text-claude-textSecondary">Base URL</div>
+                  <input
+                    value={customBaseUrl}
+                    onChange={(e) => setCustomBaseUrl(e.target.value)}
+                    className={inputClass}
+                    placeholder="https://your-api.example.com"
+                    spellCheck={false}
+                  />
+                </div>
+                <div>
+                  <div className="mb-1.5 text-[13px] text-claude-textSecondary">API Key</div>
+                  <input
+                    value={customKey}
+                    onChange={(e) => setCustomKey(e.target.value)}
+                    className={inputClass}
+                    placeholder="输入你的兼容接口 API Key"
+                    spellCheck={false}
+                  />
+                </div>
+                <div className="rounded-xl border border-claude-border bg-black/[0.02] dark:bg-white/[0.02] px-4 py-3 text-[12px] leading-6 text-claude-textSecondary">
+                  这里适合 OpenAI 兼容接口、代理服务或你自己的网关。保存后，模型与请求将走你填写的兼容地址。
+                </div>
+                <div className="flex justify-end">
+                  <button
+                    onClick={saveCustom}
+                    className="rounded-xl bg-claude-text px-5 py-2.5 text-[14px] font-medium text-claude-bg hover:opacity-90"
+                  >
+                    保存并进入应用
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );

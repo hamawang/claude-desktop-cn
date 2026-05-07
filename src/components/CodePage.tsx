@@ -1,10 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Check,
   ChevronRight,
   Copy,
+  MessageSquareText,
   Download,
+  Ellipsis,
   ExternalLink,
   File,
   FilePlus,
@@ -26,6 +28,11 @@ import {
   Upload,
   X,
 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { useNavigate } from 'react-router-dom';
 import {
   CodeCommandResult,
   CodeCommandAuditEntry,
@@ -36,7 +43,9 @@ import {
   CodeWorkspaceHealthResult,
   CodeWorkspaceEntry,
   createCodeEntry,
+  createConversation,
   deleteCodeEntry,
+  getConversation,
   getAgentConfig,
   getCodeCommandAudit,
   getCodeGitFileDiff,
@@ -50,6 +59,7 @@ import {
   runCodeGitAction,
   runCodeGitFileAction,
   saveCodeFile,
+  sendMessage,
   updateAgentConfig,
 } from '../api';
 import { getStoredUiLanguage } from '../utils/chineseClientText';
@@ -64,6 +74,33 @@ type DiffLine = {
   oldLine?: number;
   newLine?: number;
   text: string;
+};
+
+type AssistantRequestItem = {
+  id: string;
+  prompt: string;
+  createdAt: number;
+};
+
+type EmbeddedAssistantMessage = {
+  id?: string;
+  role: 'user' | 'assistant';
+  content: string;
+  thinking?: string;
+  isThinking?: boolean;
+  created_at?: string;
+  error?: boolean;
+};
+
+type BottomPanelTab = 'problems' | 'output' | 'debug' | 'terminal' | 'ports';
+
+type AssistantAttachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  preview: string;
+  source: 'upload' | 'context';
 };
 
 type TreeContextMenuState = {
@@ -238,6 +275,75 @@ const getGitDisplayPath = (value: string) => {
   return arrowIndex >= 0 ? normalized.slice(arrowIndex + 4) : normalized;
 };
 
+const stripThinkTags = (value: string) => (
+  (value || '')
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<\/?think>/gi, '')
+    .trim()
+);
+
+const inferCodeLanguage = (fileName: string) => {
+  const ext = (fileName.split('.').pop() || '').toLowerCase();
+  const map: Record<string, string> = {
+    ts: 'typescript',
+    tsx: 'tsx',
+    js: 'javascript',
+    jsx: 'jsx',
+    json: 'json',
+    css: 'css',
+    scss: 'scss',
+    html: 'html',
+    md: 'markdown',
+    yml: 'yaml',
+    yaml: 'yaml',
+    sh: 'bash',
+    ps1: 'powershell',
+    cjs: 'javascript',
+    mjs: 'javascript',
+    py: 'python',
+    xml: 'xml',
+  };
+  return map[ext] || 'text';
+};
+
+const editorSyntaxTheme = {
+  ...vscDarkPlus,
+  'pre[class*="language-"]': {
+    ...(vscDarkPlus['pre[class*="language-"]'] || {}),
+    background: '#1e1e1e',
+    margin: 0,
+    padding: 0,
+    fontSize: '12px',
+    lineHeight: '1.65',
+    fontFamily: 'Consolas, "Cascadia Code", "Courier New", monospace',
+  },
+  'code[class*="language-"]': {
+    ...(vscDarkPlus['code[class*="language-"]'] || {}),
+    background: 'transparent',
+    fontSize: '12px',
+    lineHeight: '1.65',
+    fontFamily: 'Consolas, "Cascadia Code", "Courier New", monospace',
+  },
+};
+
+const getTextPreview = (value: string, maxLines = 160, maxChars = 12000) => {
+  if (!value) return '';
+  const lines = value.split(/\r?\n/).slice(0, maxLines);
+  const joined = lines.join('\n');
+  return joined.length > maxChars ? `${joined.slice(0, maxChars)}\n...` : joined;
+};
+
+const extractCodeBlocks = (value: string) => {
+  if (!value) return [] as string[];
+  const blocks: string[] = [];
+  const regex = /```(?:[\w.+-]+)?\r?\n([\s\S]*?)```/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(value)) !== null) {
+    blocks.push(match[1].replace(/\s+$/, ''));
+  }
+  return blocks;
+};
+
 const getPermissionCopy = (mode: PermissionMode, isZh: boolean) => {
   const copy: Record<PermissionMode, { label: string; desc: string; tone: string }> = {
     workspace_write: {
@@ -290,11 +396,14 @@ interface CodePageProps {
 }
 
 const CodePage = ({ desktopTabId }: CodePageProps) => {
+  const navigate = useNavigate();
   const uiLanguage = getStoredUiLanguage();
   const isZh = uiLanguage === 'zh-CN';
   const workspaceStorageKey = desktopTabId ? `code_workspace_path:${desktopTabId}` : 'code_workspace_path';
   const commandHistoryStorageKey = desktopTabId ? `code_command_history:${desktopTabId}` : 'code_command_history';
   const commandDraftStorageKey = desktopTabId ? `code_command_draft:${desktopTabId}` : 'code_command_draft';
+  const assistantHistoryStorageKey = desktopTabId ? `code_assistant_history:${desktopTabId}` : 'code_assistant_history';
+  const assistantConversationStorageKey = desktopTabId ? `code_assistant_conversation:${desktopTabId}` : 'code_assistant_conversation';
   const [workspacePath, setWorkspacePath] = useState(() => localStorage.getItem(workspaceStorageKey) || localStorage.getItem('code_workspace_path') || '');
   const [currentPath, setCurrentPath] = useState('');
   const [parentPath, setParentPath] = useState<string | null>(null);
@@ -324,11 +433,39 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
   const [gitFileBusyAction, setGitFileBusyAction] = useState<GitFileAction | null>(null);
   const [fileOperationBusy, setFileOperationBusy] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
+  const [assistantDraft, setAssistantDraft] = useState('');
+  const [assistantHistory, setAssistantHistory] = useState<AssistantRequestItem[]>(() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem(assistantHistoryStorageKey) || '[]');
+      return Array.isArray(raw) ? raw.filter((item) => item && typeof item.prompt === 'string').slice(0, 6) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [assistantConversationId, setAssistantConversationId] = useState(() => localStorage.getItem(assistantConversationStorageKey) || '');
+  const [assistantMessages, setAssistantMessages] = useState<EmbeddedAssistantMessage[]>([]);
+  const [assistantStreaming, setAssistantStreaming] = useState(false);
+  const [assistantConversationLoading, setAssistantConversationLoading] = useState(false);
+  const [assistantError, setAssistantError] = useState('');
+  const [assistantApplyNotice, setAssistantApplyNotice] = useState('');
+  const [assistantAttachments, setAssistantAttachments] = useState<AssistantAttachment[]>([]);
+  const [activeBottomTab, setActiveBottomTab] = useState<BottomPanelTab>('terminal');
+  const [showAssistantMenu, setShowAssistantMenu] = useState(false);
+  const [leftPaneWidth, setLeftPaneWidth] = useState(() => Number(localStorage.getItem('code_left_pane_width') || '280'));
+  const [rightPaneWidth, setRightPaneWidth] = useState(() => Number(localStorage.getItem('code_right_pane_width') || '520'));
+  const [bottomPanelHeight, setBottomPanelHeight] = useState(() => Number(localStorage.getItem('code_bottom_panel_height') || '232'));
+  const [showRightPane, setShowRightPane] = useState(() => localStorage.getItem('code_show_right_pane') !== '0');
+  const [showBottomPane, setShowBottomPane] = useState(() => localStorage.getItem('code_show_bottom_pane') !== '0');
+  const [showAdvancedTools, setShowAdvancedTools] = useState(false);
   const [treeMenu, setTreeMenu] = useState<TreeContextMenuState | null>(null);
   const [workspaceDialog, setWorkspaceDialog] = useState<WorkspaceDialogState | null>(null);
   const [pendingApproval, setPendingApproval] = useState<CommandApprovalState | null>(null);
   const [error, setError] = useState('');
   const treeMenuRef = useRef<HTMLDivElement | null>(null);
+  const assistantFileInputRef = useRef<HTMLInputElement | null>(null);
+  const editorScrollRef = useRef<HTMLDivElement | null>(null);
+  const editorTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const resizeStateRef = useRef<null | { type: 'left' | 'right' | 'bottom'; startX: number; startY: number; startWidth?: number; startHeight?: number }>(null);
 
   const relativeCurrentPath = useMemo(() => getRelativePath(workspacePath, currentPath || workspacePath), [workspacePath, currentPath]);
   const breadcrumbParts = useMemo(() => splitPath(relativeCurrentPath === '.' ? '' : relativeCurrentPath), [relativeCurrentPath]);
@@ -346,6 +483,58 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
       mtime: '',
     };
   }, [selectedFile]);
+  const selectedFileRelativePath = useMemo(() => (
+    selectedFile ? getRelativePath(workspacePath, selectedFile.path) : ''
+  ), [selectedFile, workspacePath]);
+  const assistantFilePreview = useMemo(() => {
+    if (!selectedFileRelativePath || !isEditableFile) return '';
+    return getTextPreview(editorContent, 160, 12000);
+  }, [editorContent, isEditableFile, selectedFileRelativePath]);
+  const attachmentContextBlock = useMemo(() => {
+    if (!assistantAttachments.length) return '';
+    return assistantAttachments
+      .map((item) => {
+        const sourceLabel = item.source === 'context'
+          ? (isZh ? '来自当前上下文' : 'From current context')
+          : (isZh ? '来自上传内容' : 'From upload');
+        const previewText = item.preview
+          ? `\n\`\`\`\n${item.preview}\n\`\`\``
+          : `\n${isZh ? '这个附件不是纯文本，先根据名称和类型理解它。' : 'This attachment is not plain text. Infer from its name and type first.'}`;
+        return `${isZh ? '附件' : 'Attachment'}：${item.name} (${sourceLabel}, ${item.mimeType || 'file'}, ${formatBytes(item.size)})${previewText}`;
+      })
+      .join('\n\n');
+  }, [assistantAttachments, isZh]);
+  const workspaceIssues = useMemo(() => (
+    workspaceHealth?.checks?.filter((item) => item.status !== 'ok') || []
+  ), [workspaceHealth]);
+  const detectedPorts = useMemo(() => {
+    const seen = new Set<string>();
+    const matches: Array<{ port: string; source: string }> = [];
+    const regex = /\b(?:localhost|127\.0\.0\.1|0\.0\.0\.0)?[: ](\d{2,5})\b/g;
+    commandHistory.forEach((entry) => {
+      const text = `${entry.command}\n${entry.output || ''}`;
+      let result: RegExpExecArray | null;
+      while ((result = regex.exec(text)) !== null) {
+        const port = result[1];
+        if (!seen.has(port)) {
+          seen.add(port);
+          matches.push({ port, source: entry.command });
+        }
+      }
+    });
+    return matches.slice(0, 8);
+  }, [commandHistory]);
+  const debugLines = useMemo(() => {
+    const rows: string[] = [];
+    if (assistantStreaming) rows.push(isZh ? 'Claude 正在生成回复…' : 'Claude is generating a reply...');
+    if (assistantError) rows.push(`${isZh ? '对话错误' : 'Assistant error'}: ${assistantError}`);
+    if (error) rows.push(`${isZh ? '代码页错误' : 'Code page error'}: ${error}`);
+    if (pendingApproval?.approval?.message) rows.push(`${isZh ? '等待确认' : 'Awaiting approval'}: ${pendingApproval.approval.message}`);
+    if (commandHistory[0]) rows.push(`${isZh ? '最近命令' : 'Last command'}: ${commandHistory[0].command}`);
+    if (!rows.length) rows.push(isZh ? '这里会显示代码页的调试信息、审批状态和 Claude 运行提示。' : 'Debug messages, approval state, and Claude runtime hints appear here.');
+    return rows;
+  }, [assistantError, assistantStreaming, commandHistory, error, isZh, pendingApproval]);
+  const codeLanguage = useMemo(() => inferCodeLanguage(selectedFile?.name || ''), [selectedFile?.name]);
   const recentCommands = useMemo(() => {
     const seen = new Set<string>();
     return commandHistory
@@ -398,6 +587,425 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
       return true;
     });
   }, [auditDecisionFilter, auditRiskFilter, commandAudit]);
+
+  const launchClaudeTask = useCallback((prompt: string) => {
+    const nextPrompt = prompt.trim();
+    if (!nextPrompt) return;
+    setAssistantHistory((prev) => [
+      { id: `assistant-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`, prompt: nextPrompt, createdAt: Date.now() },
+      ...prev.filter((item) => item.prompt !== nextPrompt),
+    ].slice(0, 6));
+    sessionStorage.setItem('prefill_input', nextPrompt);
+    navigate('/');
+  }, [navigate]);
+
+  const buildAssistantContextPrompt = useCallback((nextPrompt: string) => {
+    return [
+      workspacePath ? `${isZh ? '当前工作区' : 'Current workspace'}：${workspacePath}` : '',
+      selectedFileRelativePath ? `${isZh ? '当前文件' : 'Current file'}：${selectedFileRelativePath}` : '',
+      selectedFileRelativePath && isEditableFile
+        ? `${isZh ? '当前文件内容摘要（回答时请优先参考这里）' : 'Current file excerpt (please prioritize this while answering)'}：\n\`\`\`\n${assistantFilePreview}\n\`\`\``
+        : '',
+      attachmentContextBlock ? `${isZh ? '附加上下文' : 'Attached context'}：\n${attachmentContextBlock}` : '',
+      isDirty
+        ? (isZh ? '注意：当前文件有未保存的本地修改，回答时请把这些改动也算进去。' : 'Note: the current file has unsaved local edits. Please include them in your reasoning.')
+        : '',
+      nextPrompt,
+    ].filter(Boolean).join('\n\n');
+  }, [assistantFilePreview, attachmentContextBlock, isDirty, isEditableFile, isZh, selectedFileRelativePath, workspacePath]);
+
+  const enrichAssistantPrompt = useCallback((nextPrompt: string) => {
+    return [
+      selectedFileRelativePath && isEditableFile && assistantFilePreview
+        ? `${isZh ? '补充上下文：请优先参考我当前打开文件的内容。' : 'Extra context: please prioritize the file I currently have open.'}\n\`\`\`\n${assistantFilePreview}\n\`\`\``
+        : '',
+      attachmentContextBlock
+        ? `${isZh ? '补充上下文：请一并参考这些附件内容。' : 'Extra context: please also use the attached files.'}\n${attachmentContextBlock}`
+        : '',
+      isDirty
+        ? (isZh ? '补充上下文：这个文件还有未保存的本地修改，回答时请一起考虑。' : 'Extra context: this file has unsaved local edits. Please include them in your reasoning.')
+        : '',
+      nextPrompt,
+    ].filter(Boolean).join('\n\n');
+  }, [assistantFilePreview, attachmentContextBlock, isDirty, isEditableFile, isZh, selectedFileRelativePath]);
+
+  const sendAssistantDraftWithContext = useCallback(() => {
+    const nextPrompt = assistantDraft.trim();
+    if (!nextPrompt) return;
+    setAssistantDraft('');
+    launchClaudeTask(buildAssistantContextPrompt(nextPrompt));
+  }, [assistantDraft, buildAssistantContextPrompt, launchClaudeTask]);
+
+  const sendAssistantDraft = useCallback(() => {
+    const nextPrompt = assistantDraft.trim();
+    if (!nextPrompt) return;
+    const context = buildAssistantContextPrompt(nextPrompt);
+    setAssistantDraft('');
+    launchClaudeTask(context);
+  }, [assistantDraft, buildAssistantContextPrompt, launchClaudeTask]);
+
+  const openAssistantUpload = useCallback(() => {
+    assistantFileInputRef.current?.click();
+    setShowAssistantMenu(false);
+  }, []);
+
+  const addCurrentFileAsContext = useCallback(() => {
+    if (!selectedFile || selectedFile.binary) {
+      setAssistantError(isZh ? '请先打开一个可读取的文本文件，再把它加到上下文里。' : 'Open a readable text file before adding it as context.');
+      setShowAssistantMenu(false);
+      return;
+    }
+    const nextAttachment: AssistantAttachment = {
+      id: `ctx-${Date.now().toString(36)}`,
+      name: selectedFile.name,
+      mimeType: selectedFile.mimeType || 'text/plain',
+      size: selectedFile.size,
+      preview: getTextPreview(editorContent, 220, 10000),
+      source: 'context',
+    };
+    setAssistantAttachments((prev) => [nextAttachment, ...prev.filter((item) => item.name !== nextAttachment.name)].slice(0, 4));
+    setAssistantError('');
+    setShowAssistantMenu(false);
+  }, [editorContent, isZh, selectedFile]);
+
+  const removeAssistantAttachment = useCallback((id: string) => {
+    setAssistantAttachments((prev) => prev.filter((item) => item.id !== id));
+  }, []);
+
+  const handleAssistantFileUpload = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []);
+    if (!files.length) return;
+    const nextAttachments = await Promise.all(files.slice(0, 4).map(async (file) => {
+      let preview = '';
+      const isTextLike = file.type.startsWith('text/') || /\.(md|txt|json|ts|tsx|js|jsx|css|html|yml|yaml|env)$/i.test(file.name);
+      if (isTextLike) {
+        try {
+          const raw = await file.text();
+          preview = getTextPreview(raw, 220, 10000);
+        } catch {
+          preview = '';
+        }
+      }
+      return {
+        id: `upload-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+        name: file.name,
+        mimeType: file.type || 'application/octet-stream',
+        size: file.size,
+        preview,
+        source: 'upload' as const,
+      };
+    }));
+    setAssistantAttachments((prev) => [...nextAttachments, ...prev].slice(0, 4));
+    setAssistantError('');
+    event.target.value = '';
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem(assistantHistoryStorageKey, JSON.stringify(assistantHistory));
+  }, [assistantHistory, assistantHistoryStorageKey]);
+
+  useEffect(() => {
+    localStorage.setItem('code_left_pane_width', String(leftPaneWidth));
+  }, [leftPaneWidth]);
+
+  useEffect(() => {
+    localStorage.setItem('code_right_pane_width', String(rightPaneWidth));
+  }, [rightPaneWidth]);
+
+  useEffect(() => {
+    localStorage.setItem('code_bottom_panel_height', String(bottomPanelHeight));
+  }, [bottomPanelHeight]);
+
+  useEffect(() => {
+    localStorage.setItem('code_show_right_pane', showRightPane ? '1' : '0');
+  }, [showRightPane]);
+
+  useEffect(() => {
+    localStorage.setItem('code_show_bottom_pane', showBottomPane ? '1' : '0');
+  }, [showBottomPane]);
+
+  useEffect(() => {
+    if (!assistantConversationId) {
+      setAssistantMessages([]);
+      return;
+    }
+    let cancelled = false;
+    setAssistantConversationLoading(true);
+    getConversation(assistantConversationId)
+      .then((data) => {
+        if (cancelled) return;
+        const nextMessages = Array.isArray(data?.messages)
+          ? data.messages
+              .filter((message: any) => message && (message.role === 'user' || message.role === 'assistant'))
+              .map((message: any) => ({
+                id: message.id,
+                role: message.role,
+                content: String(message.content || ''),
+                thinking: typeof message.thinking === 'string' ? message.thinking : undefined,
+                isThinking: !!message.isThinking,
+                created_at: message.created_at,
+              }))
+          : [];
+        setAssistantMessages(nextMessages.slice(-10));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setAssistantError(isZh ? '右侧对话加载失败，请稍后重试。' : 'Failed to load side chat.');
+      })
+      .finally(() => {
+        if (!cancelled) setAssistantConversationLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [assistantConversationId, isZh]);
+
+  useEffect(() => {
+    if (!assistantConversationId) {
+      localStorage.removeItem(assistantConversationStorageKey);
+      return;
+    }
+    localStorage.setItem(assistantConversationStorageKey, assistantConversationId);
+  }, [assistantConversationId, assistantConversationStorageKey]);
+
+  useEffect(() => {
+    const handleMove = (event: MouseEvent) => {
+      const state = resizeStateRef.current;
+      if (!state) return;
+      if (state.type === 'left' && typeof state.startWidth === 'number') {
+        const next = Math.min(420, Math.max(220, state.startWidth + (event.clientX - state.startX)));
+        setLeftPaneWidth(next);
+      }
+      if (state.type === 'right' && typeof state.startWidth === 'number') {
+        const next = Math.min(760, Math.max(360, state.startWidth - (event.clientX - state.startX)));
+        setRightPaneWidth(next);
+      }
+      if (state.type === 'bottom' && typeof state.startHeight === 'number') {
+        const next = Math.min(420, Math.max(160, state.startHeight - (event.clientY - state.startY)));
+        setBottomPanelHeight(next);
+      }
+    };
+
+    const handleUp = () => {
+      resizeStateRef.current = null;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', handleUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', handleUp);
+    };
+  }, []);
+
+  const sendEmbeddedAssistantPrompt = useCallback(async (rawPrompt: string) => {
+    const nextPrompt = rawPrompt.trim();
+    if (!nextPrompt || assistantStreaming) return;
+
+    const contextPrompt = buildAssistantContextPrompt(nextPrompt);
+
+    setAssistantError('');
+    setAssistantStreaming(true);
+
+    const optimisticUser: EmbeddedAssistantMessage = {
+      role: 'user',
+      content: nextPrompt,
+      created_at: new Date().toISOString(),
+    };
+    const optimisticAssistant: EmbeddedAssistantMessage = {
+      role: 'assistant',
+      content: '',
+      isThinking: true,
+      created_at: new Date().toISOString(),
+    };
+    setAssistantMessages((prev) => [...prev.slice(-8), optimisticUser, optimisticAssistant]);
+
+    let conversationId = assistantConversationId;
+    try {
+      if (!conversationId) {
+        const created = await createConversation(isZh ? '代码侧栏助手' : 'Code sidebar assistant');
+        conversationId = created?.id;
+        if (!conversationId) {
+          throw new Error(isZh ? '创建对话失败' : 'Failed to create conversation');
+        }
+        setAssistantConversationId(conversationId);
+      }
+
+      await sendMessage(
+        conversationId,
+        contextPrompt,
+        null,
+        (_delta, full) => {
+          setAssistantMessages((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (last?.role === 'assistant') {
+              last.content = full;
+              last.isThinking = false;
+            }
+            return next.slice(-10);
+          });
+        },
+        (full) => {
+          setAssistantStreaming(false);
+          setAssistantMessages((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (last?.role === 'assistant') {
+              last.content = full;
+              last.isThinking = false;
+              last.error = false;
+            }
+            return next.slice(-10);
+          });
+        },
+        (err) => {
+          setAssistantStreaming(false);
+          setAssistantError(err || (isZh ? '发送失败' : 'Send failed'));
+          setAssistantMessages((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (last?.role === 'assistant') {
+              last.content = err || (isZh ? '发送失败，请稍后重试。' : 'Send failed. Please try again.');
+              last.isThinking = false;
+              last.error = true;
+            }
+            return next.slice(-10);
+          });
+        },
+        (thinkingDelta, thinkingFull) => {
+          setAssistantMessages((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (last?.role === 'assistant') {
+              last.thinking = thinkingFull;
+              last.isThinking = true;
+              if (!last.content) {
+                last.content = thinkingDelta;
+              }
+            }
+            return next.slice(-10);
+          });
+        },
+      );
+    } catch (error: any) {
+      setAssistantStreaming(false);
+      setAssistantError(error?.message || (isZh ? '发送失败' : 'Send failed'));
+      setAssistantMessages((prev) => {
+        const next = [...prev];
+        const last = next[next.length - 1];
+        if (last?.role === 'assistant') {
+          last.content = error?.message || (isZh ? '发送失败，请稍后重试。' : 'Send failed. Please try again.');
+          last.isThinking = false;
+          last.error = true;
+        }
+        return next.slice(-10);
+      });
+    }
+  }, [assistantConversationId, assistantStreaming, isZh, selectedFileRelativePath, workspacePath]);
+
+  const sendEmbeddedAssistantPromptWithContext = useCallback(async (rawPrompt: string) => {
+    await sendEmbeddedAssistantPrompt(enrichAssistantPrompt(rawPrompt));
+  }, [enrichAssistantPrompt, sendEmbeddedAssistantPrompt]);
+
+  const sendEmbeddedAssistantMessage = useCallback(async () => {
+    const nextPrompt = assistantDraft.trim();
+    if (!nextPrompt) return;
+    setAssistantDraft('');
+    await sendEmbeddedAssistantPromptWithContext(nextPrompt);
+  }, [assistantDraft, sendEmbeddedAssistantPromptWithContext]);
+
+  const askAboutSelectedFile = useCallback(() => {
+    if (!selectedFileRelativePath) return;
+    setAssistantDraft(
+      isZh
+        ? `请先用普通人也能看懂的话，解释当前文件「${selectedFileRelativePath}」是做什么的，然后告诉我如果要修改它，最应该先动哪一块。`
+        : `Explain what the current file "${selectedFileRelativePath}" does, then tell me what part should be changed first.`,
+    );
+  }, [isZh, selectedFileRelativePath]);
+
+  const applyAssistantCodeToEditor = useCallback((nextContent: string) => {
+    if (!selectedFile || !isEditableFile) {
+      setAssistantError(isZh ? '请先打开一个可编辑的文本文件，再应用 Claude 给出的代码。' : 'Open an editable text file before applying Claude code.');
+      return;
+    }
+    setEditorContent(nextContent);
+    setShowDiff(true);
+    setAssistantError('');
+    setAssistantApplyNotice(
+      isZh
+        ? `已把 Claude 给出的代码放进「${selectedFile.name}」草稿。你可以先看差异，确认后再点保存。`
+        : `Claude's code has been placed into the draft for "${selectedFile.name}". Review the diff, then save when you're ready.`,
+    );
+  }, [isEditableFile, isZh, selectedFile]);
+
+  useEffect(() => {
+    setAssistantApplyNotice('');
+  }, [selectedFile?.path]);
+
+  const startPaneResize = (type: 'left' | 'right' | 'bottom', event: React.MouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    resizeStateRef.current = {
+      type,
+      startX: event.clientX,
+      startY: event.clientY,
+      startWidth: type === 'left' ? leftPaneWidth : type === 'right' ? rightPaneWidth : undefined,
+      startHeight: type === 'bottom' ? bottomPanelHeight : undefined,
+    };
+    document.body.style.cursor = type === 'bottom' ? 'row-resize' : 'col-resize';
+    document.body.style.userSelect = 'none';
+  };
+
+  const workspaceAssistantPrompts = useMemo(() => {
+    const selectedPath = selectedFile ? getRelativePath(workspacePath, selectedFile.path) : '';
+    const gitHint = gitStatus?.isRepo
+      ? (isZh ? '这个目录已经接入 Git。' : 'This directory is already tracked by Git.')
+      : (isZh ? '这个目录目前还不是 Git 仓库。' : 'This directory is not a Git repository yet.');
+    const workspaceHint = workspacePath
+      ? `${isZh ? '当前工作区' : 'Current workspace'}：${workspacePath}`
+      : '';
+
+    return [
+      {
+        title: isZh ? '先帮我看懂这个项目' : 'Explain this project first',
+        description: isZh ? '适合第一次打开项目时先快速看懂结构。' : 'Best for a first look at the project structure.',
+        prompt: [
+          workspaceHint,
+          gitHint,
+          isZh
+            ? '请先用普通人也能看懂的话，告诉我这个项目是做什么的、主要有哪些页面或模块、我下一步最适合改哪里。'
+            : 'Explain what this project does, which pages or modules matter, and what to change next.',
+        ].filter(Boolean).join('\n'),
+      },
+      {
+        title: isZh ? '帮我修改当前文件' : 'Edit the current file',
+        description: selectedPath
+          ? (isZh ? `围绕当前选中的文件「${selectedPath}」发起修改。` : `Start from the selected file: ${selectedPath}`)
+          : (isZh ? '先选一个文件，再让 Claude 直接帮你改。' : 'Select a file first, then ask Claude to edit it.'),
+        prompt: selectedPath
+          ? [
+              workspaceHint,
+              isZh
+                ? `请先阅读文件「${selectedPath}」，用不懂代码的人也能看懂的话解释它是做什么的，然后等我继续告诉你要改什么。`
+                : `Read "${selectedPath}", explain it simply, and wait for my requested change.`,
+            ].join('\n')
+          : '',
+        disabled: !selectedPath,
+      },
+      {
+        title: isZh ? '让 Claude 自己找问题' : 'Let Claude inspect for issues',
+        description: isZh ? '适合遇到黑屏、报错、布局奇怪或未汉化这些问题。' : 'Useful for bugs, layout issues, and untranslated copy.',
+        prompt: [
+          workspaceHint,
+          isZh
+            ? '请先检查这个工作区里最值得优先修的地方，重点看黑屏、未汉化、布局错位和明显的交互问题，并告诉我你准备先改哪一处。'
+            : 'Inspect the workspace for the most important issues first and tell me what you would fix first.',
+        ].filter(Boolean).join('\n'),
+      },
+    ];
+  }, [gitStatus?.isRepo, isZh, selectedFile, workspacePath]);
 
   const rememberWorkspacePath = useCallback((nextWorkspacePath: string) => {
     if (!nextWorkspacePath) return;
@@ -834,6 +1442,7 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
       const saved = await saveCodeFile(workspacePath, selectedFile.path, editorContent);
       setOriginalContent(editorContent);
       setShowDiff(false);
+      setAssistantApplyNotice('');
       setSelectedFile(prev => prev ? { ...prev, content: editorContent, size: saved.size, mimeType: saved.mimeType, truncated: false } : prev);
       await loadDirectory(currentPath);
       await refreshGitStatus();
@@ -848,6 +1457,7 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
     if (!isEditableFile || !isDirty) return;
     setEditorContent(originalContent);
     setShowDiff(false);
+    setAssistantApplyNotice('');
   };
 
   const switchPermission = async (mode: PermissionMode) => {
@@ -867,7 +1477,7 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
     if (!approved && isDangerousCommand(trimmed)) {
       const ok = window.confirm(
         isZh
-          ? `这条命令可能会删除文件、重置仓库或影响系统：\n\n${trimmed}\n\n确定继续执行吗？`
+          ? `这条命令可能会删除文件、重置仓库或影响系统。\n\n${trimmed}\n\n确定继续执行吗？`
           : `This command may delete files, reset Git history, or affect the system:\n\n${trimmed}\n\nDo you want to continue?`
       );
       if (!ok) return;
@@ -988,7 +1598,7 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
   const runGitFileAction = async (action: GitFileAction, file = selectedGitFile) => {
     if (!workspacePath || !file || gitFileBusyAction) return;
     if (action === 'discard_file') {
-      const ok = window.confirm(isZh ? `丢弃 ${getGitDisplayPath(file.path)} 的 Git 改动？这个操作不能撤销。` : `Discard Git changes in ${getGitDisplayPath(file.path)}? This cannot be undone.`);
+      const ok = window.confirm(isZh ? `丢弃 ${getGitDisplayPath(file.path)} 的 Git 改动吗？这个操作不能撤销。` : `Discard Git changes in ${getGitDisplayPath(file.path)}? This cannot be undone.`);
       if (!ok) return;
     }
     setGitFileBusyAction(action);
@@ -1038,7 +1648,7 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
     if (!diffText) {
       return (
         <div className="p-3 text-[12px] text-claude-textSecondary">
-          {isZh ? '没有可显示的差异。' : 'No diff to show.'}
+          {isZh ? '这里还没有可显示的差异内容。' : 'No diff content is available yet.'}
         </div>
       );
     }
@@ -1069,6 +1679,190 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
             </div>
           );
         })}
+      </div>
+    );
+  };
+
+  const renderAssistantMarkdown = (content: string) => (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        p: ({ children }) => <p className="mb-3 last:mb-0 whitespace-pre-wrap break-words">{children}</p>,
+        ul: ({ children }) => <ul className="mb-3 list-disc space-y-1 pl-5 last:mb-0">{children}</ul>,
+        ol: ({ children }) => <ol className="mb-3 list-decimal space-y-1 pl-5 last:mb-0">{children}</ol>,
+        li: ({ children }) => <li className="leading-6 text-[#D4D4D4]">{children}</li>,
+        strong: ({ children }) => <strong className="font-semibold text-[#FFFFFF]">{children}</strong>,
+        em: ({ children }) => <em className="text-[#C586C0] not-italic">{children}</em>,
+        a: ({ href, children }) => <a href={href} className="text-[#4FC1FF] hover:underline">{children}</a>,
+        code(props) {
+          const { children, className, inline, ...rest } = props as any;
+          const match = /language-(\w+)/.exec(className || '');
+          const code = String(children || '').replace(/\n$/, '');
+          if (!inline) {
+            return (
+              <SyntaxHighlighter
+                // @ts-expect-error style typing from dependency
+                style={vscDarkPlus}
+                language={match?.[1] || 'text'}
+                PreTag="div"
+                customStyle={{
+                  margin: '0 0 12px 0',
+                  borderRadius: '8px',
+                  background: '#1E1E1E',
+                  border: '1px solid #2D2D30',
+                  fontSize: '12px',
+                  lineHeight: '1.6',
+                }}
+                {...rest}
+              >
+                {code}
+              </SyntaxHighlighter>
+            );
+          }
+          return (
+            <code className="rounded bg-[#252526] px-1.5 py-0.5 font-mono text-[11px] text-[#DCDCAA]" {...rest}>
+              {children}
+            </code>
+          );
+        },
+      }}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+
+  const renderBottomPanel = () => {
+    if (activeBottomTab === 'problems') {
+      if (!workspaceIssues.length) {
+        return (
+          <div className="px-4 py-4 text-[12px] text-[#9D9D9D]">
+            {isZh ? '没有检测到新的问题。这里会显示工作区健康检查里的风险、缺失项和修复建议。' : 'No problems found. Workspace issues and fix suggestions will appear here.'}
+          </div>
+        );
+      }
+      return (
+        <div className="divide-y divide-[#2A2A2A]">
+          {workspaceIssues.map((item, index) => (
+            <div key={`${item.label}-${index}`} className="px-4 py-3 text-[12px]">
+              <div className="flex items-center gap-2">
+                <AlertTriangle size={13} className={healthToneClass(item.status)} />
+                <span className="font-medium text-[#E8E8E8]">{item.label}</span>
+                <span className="text-[#8B8B8B]">{item.summary}</span>
+              </div>
+              {item.details ? (
+                <div className="mt-1 pl-5 text-[#9D9D9D]">{item.details}</div>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    if (activeBottomTab === 'output') {
+      if (!commandHistory.length) {
+        return <div className="px-4 py-4 text-[12px] text-[#9D9D9D]">{isZh ? '这里会显示最近命令的输出结果。' : 'Recent command output will appear here.'}</div>;
+      }
+      return (
+        <div className="divide-y divide-[#2A2A2A]">
+          {commandHistory.slice(0, 6).map((entry, index) => (
+            <div key={`${entry.command}-${index}`} className="px-4 py-3">
+              <div className="mb-2 flex items-center justify-between gap-3 text-[11px]">
+                <span className="font-mono text-[#C586C0]">{entry.command}</span>
+                <span className={`${entry.isError ? 'text-[#F48771]' : 'text-[#4EC9B0]'}`}>{entry.isError ? (isZh ? '失败' : 'Failed') : (isZh ? '完成' : 'Done')}</span>
+              </div>
+              <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-[#CE9178]">{entry.output || (isZh ? '没有输出。' : 'No output.')}</pre>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    if (activeBottomTab === 'debug') {
+      return (
+        <div className="px-4 py-3 font-mono text-[11px] leading-6 text-[#9CDCFE]">
+          {debugLines.map((line, index) => (
+            <div key={`${line}-${index}`} className="border-b border-[#2A2A2A] py-1 last:border-b-0">{line}</div>
+          ))}
+        </div>
+      );
+    }
+
+    if (activeBottomTab === 'ports') {
+      if (!detectedPorts.length) {
+        return <div className="px-4 py-4 text-[12px] text-[#9D9D9D]">{isZh ? '还没有检测到端口。后续运行本地服务后，这里会列出 localhost 端口。' : 'No ports detected yet. Localhost ports will appear here after you run a service.'}</div>;
+      }
+      return (
+        <div className="divide-y divide-[#2A2A2A]">
+          {detectedPorts.map((item) => (
+            <div key={`${item.port}-${item.source}`} className="flex items-center justify-between gap-3 px-4 py-3 text-[12px]">
+              <div>
+                <div className="font-medium text-[#E8E8E8]">localhost:{item.port}</div>
+                <div className="mt-1 text-[#8B8B8B]">{item.source}</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => copyToClipboard(`http://localhost:${item.port}`)}
+                className="rounded border border-[#3A3A3A] px-2 py-1 text-[11px] text-[#D4D4D4] hover:bg-[#252526]"
+              >
+                {isZh ? '复制地址' : 'Copy URL'}
+              </button>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-[#2A2A2A]">
+          {commandHistory.length === 0 ? (
+            <div className="px-4 py-4 text-[12px] text-[#9D9D9D]">{isZh ? '终端输出会显示在这里。你也可以直接运行 Git、npm、pnpm、bun 或 powershell 命令。' : 'Terminal output will appear here. Run Git, npm, pnpm, bun, or PowerShell commands here.'}</div>
+          ) : (
+            commandHistory.slice(0, 8).map((entry, index) => (
+              <div key={`${entry.command}-${index}`} className="px-4 py-3">
+                <div className="mb-1 font-mono text-[11px] text-[#DCDCAA]">$ {entry.command}</div>
+                <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-[#D4D4D4]">{entry.output || ''}</pre>
+              </div>
+            ))
+          )}
+        </div>
+        <div className="border-t border-[#2A2A2A] px-3 py-3">
+          <div className="mb-2 flex flex-wrap gap-2">
+            {commandQuickActions.slice(0, 4).map((item) => (
+              <button
+                key={item.command}
+                type="button"
+                onClick={() => setCommand(item.command)}
+                className="rounded border border-[#3A3A3A] px-2 py-1 text-[11px] text-[#9CDCFE] hover:bg-[#252526]"
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-2 rounded border border-[#3A3A3A] bg-[#1E1E1E] px-3 py-2">
+            <span className="font-mono text-[11px] text-[#4EC9B0]">PS</span>
+            <input
+              value={command}
+              onChange={(event) => setCommand(event.target.value)}
+              onKeyDown={(event) => {
+                if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+                  event.preventDefault();
+                  submitCommand();
+                }
+              }}
+              placeholder={isZh ? '输入命令，例如：git status、npm run build' : 'Type a command, for example: git status'}
+              className="h-8 flex-1 bg-transparent font-mono text-[12px] text-[#D4D4D4] outline-none placeholder:text-[#6A6A6A]"
+            />
+            <button
+              type="button"
+              onClick={() => submitCommand()}
+              disabled={!command.trim() || runningCommand}
+              className="rounded bg-[#0E639C] px-3 py-1.5 text-[11px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {runningCommand ? (isZh ? '执行中' : 'Running') : (isZh ? '运行' : 'Run')}
+            </button>
+          </div>
+        </div>
       </div>
     );
   };
@@ -1115,16 +1909,16 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
     if (!gitStatus) {
       return (
         <div className="rounded-md border border-claude-border bg-claude-input p-3 text-[12px] text-claude-textSecondary">
-          {isZh ? 'Git 状态尚未读取。' : 'Git status has not loaded yet.'}
+          {isZh ? '还没有读取到 Git 状态，请先刷新一次。' : 'Git status has not loaded yet. Try refreshing it first.'}
         </div>
       );
     }
     if (!gitStatus.isRepo) {
       return (
-        <div className="rounded-md border border-claude-border bg-claude-input p-3 text-[12px] leading-5 text-claude-textSecondary">
-          <div className="font-medium text-claude-text mb-1">{isZh ? '不是 Git 仓库' : 'Not a Git repository'}</div>
-          <div>{isZh ? '当前工作区没有检测到 .git。你仍然可以编辑文件和运行命令。' : 'No .git folder was detected. You can still edit files and run commands.'}</div>
-        </div>
+          <div className="rounded-md border border-claude-border bg-claude-input p-3 text-[12px] leading-5 text-claude-textSecondary">
+            <div className="mb-1 font-medium text-claude-text">{isZh ? '不是 Git 仓库' : 'Not a Git repository'}</div>
+            <div>{isZh ? '没有检测到 .git 目录，但你仍然可以浏览文件、编辑内容和运行命令。' : 'No .git folder was detected. You can still edit files and run commands.'}</div>
+          </div>
       );
     }
 
@@ -1173,14 +1967,14 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
               <span className="text-[13px] font-medium truncate">{gitStatus.branch}</span>
             </div>
             <span className={`text-[11px] px-2 py-0.5 rounded-md border ${gitStatus.clean ? 'border-emerald-500/30 text-emerald-500 bg-emerald-500/10' : 'border-[#C6613F]/30 text-[#C6613F] bg-[#C6613F]/10'}`}>
-              {gitStatus.clean ? (isZh ? '干净' : 'clean') : gitStatus.summary}
+              {gitStatus.clean ? (isZh ? '骞插噣' : 'clean') : gitStatus.summary}
             </span>
           </div>
           {(gitStatus.ahead > 0 || gitStatus.behind > 0) && (
             <div className="mt-2 text-[11px] text-claude-textSecondary">
-              {gitStatus.ahead > 0 && <span>{isZh ? `领先 ${gitStatus.ahead}` : `ahead ${gitStatus.ahead}`}</span>}
-              {gitStatus.ahead > 0 && gitStatus.behind > 0 && <span> · </span>}
-              {gitStatus.behind > 0 && <span>{isZh ? `落后 ${gitStatus.behind}` : `behind ${gitStatus.behind}`}</span>}
+              {gitStatus.ahead > 0 && <span>{isZh ? `棰嗗厛 ${gitStatus.ahead}` : `ahead ${gitStatus.ahead}`}</span>}
+              {gitStatus.ahead > 0 && gitStatus.behind > 0 && <span> 路 </span>}
+              {gitStatus.behind > 0 && <span>{isZh ? `钀藉悗 ${gitStatus.behind}` : `behind ${gitStatus.behind}`}</span>}
             </div>
           )}
         </div>
@@ -1204,21 +1998,21 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
                   disabled={!!gitFileBusyAction || (!selectedGitFile.unstaged && selectedGitFile.code !== '??')}
                   className="h-7 px-2 rounded-md border border-claude-border text-[11px] hover:bg-claude-hover disabled:opacity-40"
                 >
-                  {gitFileBusyAction === 'stage_file' ? (isZh ? '处理中' : 'Working') : gitFileActionLabel('stage_file', isZh)}
+                  {gitFileBusyAction === 'stage_file' ? (isZh ? '处理中...' : 'Working...') : gitFileActionLabel('stage_file', isZh)}
                 </button>
                 <button
                   onClick={() => runGitFileAction('unstage_file', selectedGitFile)}
                   disabled={!!gitFileBusyAction || !selectedGitFile.staged}
                   className="h-7 px-2 rounded-md border border-claude-border text-[11px] hover:bg-claude-hover disabled:opacity-40"
                 >
-                  {gitFileBusyAction === 'unstage_file' ? (isZh ? '处理中' : 'Working') : gitFileActionLabel('unstage_file', isZh)}
+                  {gitFileBusyAction === 'unstage_file' ? (isZh ? '处理中...' : 'Working...') : gitFileActionLabel('unstage_file', isZh)}
                 </button>
                 <button
                   onClick={() => runGitFileAction('discard_file', selectedGitFile)}
                   disabled={!!gitFileBusyAction}
                   className="h-7 px-2 rounded-md border border-[#C6613F]/40 text-[#C6613F] text-[11px] hover:bg-[#C6613F]/10 disabled:opacity-40"
                 >
-                  {gitFileBusyAction === 'discard_file' ? (isZh ? '处理中' : 'Working') : gitFileActionLabel('discard_file', isZh)}
+                  {gitFileBusyAction === 'discard_file' ? (isZh ? '处理中...' : 'Working...') : gitFileActionLabel('discard_file', isZh)}
                 </button>
               </div>
             </div>
@@ -1235,7 +2029,7 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
                   )}
                   {!!gitFileDiff?.stagedDiff && (
                     <div className="rounded-md border border-emerald-500/20 overflow-hidden">
-                      <div className="px-3 py-2 text-[11px] font-medium bg-emerald-500/10 text-emerald-400">{isZh ? '暂存区改动' : 'Staged changes'}</div>
+                      <div className="px-3 py-2 text-[11px] font-medium bg-emerald-500/10 text-emerald-400">{isZh ? '已暂存改动' : 'Staged changes'}</div>
                       <div className="max-h-[180px] overflow-auto bg-claude-bg">{renderRawDiff(gitFileDiff.stagedDiff)}</div>
                     </div>
                   )}
@@ -1255,27 +2049,27 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
         <div className="grid grid-cols-2 gap-2">
           <button onClick={() => runGitAction('pull')} disabled={!!gitBusyAction} className="h-8 rounded-md border border-claude-border text-[12px] flex items-center justify-center gap-1.5 hover:bg-claude-hover disabled:opacity-50">
             <Download size={13} />
-            {gitBusyAction === 'pull' ? (isZh ? '拉取中' : 'Pulling') : gitActionLabel('pull', isZh)}
+            {gitBusyAction === 'pull' ? (isZh ? '拉取中...' : 'Pulling...') : gitActionLabel('pull', isZh)}
           </button>
           <button onClick={() => runGitAction('stage_all')} disabled={!!gitBusyAction || gitStatus.clean} className="h-8 rounded-md border border-claude-border text-[12px] flex items-center justify-center gap-1.5 hover:bg-claude-hover disabled:opacity-50">
             <Check size={13} />
-            {gitBusyAction === 'stage_all' ? (isZh ? '暂存中' : 'Staging') : gitActionLabel('stage_all', isZh)}
+            {gitBusyAction === 'stage_all' ? (isZh ? '暂存中...' : 'Staging...') : gitActionLabel('stage_all', isZh)}
           </button>
         </div>
         <input
           value={commitMessage}
           onChange={(e) => setCommitMessage(e.target.value)}
-          placeholder={isZh ? '提交说明，例如：完善 Code 工作区' : 'Commit message, e.g. Improve Code workspace'}
+          placeholder={isZh ? '输入提交说明，例如：修复代码页右侧对话体验' : 'Enter a commit message'}
           className="w-full h-8 rounded-md border border-claude-border bg-claude-input px-2 text-[12px] outline-none focus:border-[#2E7CF6]/70"
         />
         <div className="grid grid-cols-2 gap-2">
           <button onClick={() => runGitAction('commit')} disabled={!!gitBusyAction || !commitMessage.trim()} className="h-8 rounded-md bg-claude-text text-claude-bg text-[12px] flex items-center justify-center gap-1.5 disabled:opacity-50">
             <Save size={13} />
-            {gitBusyAction === 'commit' ? (isZh ? '提交中' : 'Committing') : gitActionLabel('commit', isZh)}
+            {gitBusyAction === 'commit' ? (isZh ? '提交中...' : 'Committing...') : gitActionLabel('commit', isZh)}
           </button>
           <button onClick={() => runGitAction('push')} disabled={!!gitBusyAction} className="h-8 rounded-md border border-claude-border text-[12px] flex items-center justify-center gap-1.5 hover:bg-claude-hover disabled:opacity-50">
             <Upload size={13} />
-            {gitBusyAction === 'push' ? (isZh ? '推送中' : 'Pushing') : gitActionLabel('push', isZh)}
+                        {gitBusyAction === 'push' ? (isZh ? '推送中' : 'Pushing') : gitActionLabel('push', isZh)}
           </button>
         </div>
       </div>
@@ -1290,14 +2084,42 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
               <Terminal size={18} className="text-claude-textSecondary" />
               <h1 className="text-[16px] font-semibold">{isZh ? '代码工作区' : 'Code workspace'}</h1>
               <span className="text-[11px] px-2 py-0.5 rounded-md border border-claude-border text-claude-textSecondary">
-                {isZh ? '本地模式' : 'Local mode'}
+                {isZh ? '本地调试' : 'Local mode'}
               </span>
             </div>
             <div className="text-[12px] text-claude-textSecondary mt-1 truncate max-w-[760px]">
-              {workspacePath || (isZh ? '选择一个本地文件夹，开始浏览、编辑和运行命令' : 'Choose a local folder to browse, edit, and run commands')}
+              {workspacePath || (isZh ? '选择一个本地项目目录，然后直接在右侧告诉 Claude 你想改什么。' : 'Choose a local folder, then tell Claude what you want to change on the right.')}
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowBottomPane((prev) => !prev)}
+              className={`h-8 px-3 rounded-md border text-[12px] flex items-center gap-1.5 transition-colors ${
+                showBottomPane ? 'border-[#3A3A3A] text-[#D4D4D4] hover:bg-[#252526]' : 'border-[#0E639C]/45 bg-[#0E639C]/10 text-[#9CDCFE]'
+              }`}
+              title={isZh ? '切换底部面板' : 'Toggle bottom panel'}
+            >
+              <div className="grid h-3.5 w-3.5 grid-rows-[1fr_1fr] gap-[2px]">
+                <span className="rounded-sm bg-current opacity-90" />
+                <span className="rounded-sm bg-current opacity-55" />
+              </div>
+              {isZh ? '切换底部' : 'Bottom'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowRightPane((prev) => !prev)}
+              className={`h-8 px-3 rounded-md border text-[12px] flex items-center gap-1.5 transition-colors ${
+                showRightPane ? 'border-[#3A3A3A] text-[#D4D4D4] hover:bg-[#252526]' : 'border-[#0E639C]/45 bg-[#0E639C]/10 text-[#9CDCFE]'
+              }`}
+              title={isZh ? '切换右侧面板' : 'Toggle right panel'}
+            >
+              <div className="grid h-3.5 w-3.5 grid-cols-[1fr_1fr] gap-[2px]">
+                <span className="rounded-sm bg-current opacity-55" />
+                <span className="rounded-sm bg-current opacity-90" />
+              </div>
+              {isZh ? '切换侧栏' : 'Side bar'}
+            </button>
             {(['workspace_write', 'project', 'full_access'] as PermissionMode[]).map(mode => {
               const copy = getPermissionCopy(mode, isZh);
               const active = permissionMode === mode;
@@ -1316,8 +2138,8 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
                 </button>
               );
             })}
-            <button onClick={chooseWorkspace} className="h-8 px-3 rounded-md bg-claude-text text-claude-bg text-[12px] font-medium hover:opacity-90">
-              {isZh ? '选择工作区' : 'Choose workspace'}
+            <button onClick={chooseWorkspace} className="h-8 rounded-md bg-claude-text px-3 text-[12px] font-medium text-claude-bg hover:opacity-90">
+              {isZh ? '选择项目目录' : 'Choose workspace'}
             </button>
           </div>
         </div>
@@ -1363,26 +2185,47 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
           </div>
         )}
 
+        {assistantApplyNotice && (
+          <div className="mx-5 mt-3 flex items-start gap-2 rounded-md border border-[#2E7CF6]/30 bg-[#2E7CF6]/10 px-3 py-2 text-[12px] text-[#9BC0FF] shrink-0">
+            <Check size={14} className="mt-0.5 shrink-0" />
+            <span>{assistantApplyNotice}</span>
+          </div>
+        )}
+
         {!workspacePath ? (
           <div className="flex-1 flex items-center justify-center px-6">
-            <div className="max-w-[520px] text-center">
-              <div className="mx-auto w-14 h-14 rounded-lg border border-claude-border flex items-center justify-center text-claude-textSecondary mb-5">
+            <div className="max-w-[620px] text-center">
+              <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl border border-claude-border bg-claude-input text-claude-textSecondary">
                 <FolderOpen size={26} />
               </div>
-              <h2 className="text-[22px] font-semibold mb-2">{isZh ? '先选择一个项目文件夹' : 'Start with a project folder'}</h2>
-              <p className="text-[14px] leading-6 text-claude-textSecondary mb-5">
+              <h2 className="mb-2 text-[24px] font-semibold">{isZh ? '先选一个项目目录，再直接和 Claude 说需求' : 'Choose a project folder, then talk to Claude'}</h2>
+              <p className="mb-4 text-[14px] leading-7 text-claude-textSecondary">
                 {isZh
-                  ? '这里会成为 Code 模式的工作区。默认权限把操作限制在这个目录内；完全访问权限允许命令执行和更宽的文件访问。'
-                  : 'This folder becomes the Code workspace. Default mode keeps operations inside it; full access allows commands and wider file access.'}
+                  ? '你不需要先懂 Git、命令行或文件树。先把项目目录交给 Claude，后面你就可以直接说“帮我改首页文案”“修一下黑屏”“把这页翻译成简体中文”。'
+                  : 'You do not need to understand Git, terminals, or file trees first. Pick a project folder and then describe the change you want Claude to make.'}
               </p>
-              <button onClick={chooseWorkspace} className="h-9 px-4 rounded-md bg-claude-text text-claude-bg text-[13px] font-medium hover:opacity-90">
-                {isZh ? '选择文件夹' : 'Choose folder'}
+              <div className="mx-auto mb-5 grid max-w-[560px] grid-cols-3 gap-3 text-left">
+                <div className="rounded-2xl border border-claude-border bg-claude-input px-4 py-4">
+                  <div className="text-[12px] text-claude-textSecondary">{isZh ? '第 1 步' : 'Step 1'}</div>
+                  <div className="mt-2 text-[13px] font-medium text-claude-text">{isZh ? '选择项目目录' : 'Pick a project folder'}</div>
+                </div>
+                <div className="rounded-2xl border border-claude-border bg-claude-input px-4 py-4">
+                  <div className="text-[12px] text-claude-textSecondary">{isZh ? '第 2 步' : 'Step 2'}</div>
+                  <div className="mt-2 text-[13px] font-medium text-claude-text">{isZh ? '先让 Claude 看懂项目' : 'Let Claude understand the project'}</div>
+                </div>
+                <div className="rounded-2xl border border-claude-border bg-claude-input px-4 py-4">
+                  <div className="text-[12px] text-claude-textSecondary">{isZh ? '第 3 步' : 'Step 3'}</div>
+                  <div className="mt-2 text-[13px] font-medium text-claude-text">{isZh ? '直接描述你想改什么' : 'Describe the change'}</div>
+                </div>
+              </div>
+              <button onClick={chooseWorkspace} className="h-10 rounded-xl bg-claude-text px-5 text-[13px] font-medium text-claude-bg hover:opacity-90">
+                {isZh ? '选择项目目录' : 'Choose folder'}
               </button>
             </div>
           </div>
         ) : (
-          <div className="flex-1 min-h-0 grid grid-cols-[300px_minmax(0,1fr)_380px]">
-            <aside className="border-r border-claude-border min-h-0 flex flex-col">
+          <div className="flex-1 min-h-0 flex">
+            <aside className="border-r border-claude-border min-h-0 flex flex-col shrink-0" style={{ width: leftPaneWidth }}>
               <div className="h-[42px] px-3 border-b border-claude-border flex items-center justify-between gap-2">
                 <div className="min-w-0 flex items-center gap-1.5 text-[12px] text-claude-textSecondary">
                   <button onClick={() => goToBreadcrumb(-1)} className="hover:text-claude-text transition-colors truncate max-w-[88px]">
@@ -1444,25 +2287,50 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
                 })}
                 {entries.length === 0 && !loadingTree && (
                   <div className="text-[12px] text-claude-textSecondary px-2 py-6 text-center">
-                    {isZh ? '这个目录是空的' : 'This folder is empty'}
+                    {isZh ? '这个目录目前是空的。' : 'This directory is currently empty.'}
                   </div>
                 )}
               </div>
             </aside>
-            <main className="min-w-0 min-h-0 flex flex-col">
+            <div
+              className="w-1 shrink-0 cursor-col-resize bg-transparent transition-colors hover:bg-[#0E639C]/50"
+              onMouseDown={(event) => startPaneResize('left', event)}
+            />
+            <main className="min-w-0 min-h-0 flex-1 flex flex-col">
               <div className="h-[42px] px-4 border-b border-claude-border flex items-center justify-between">
                 <div className="min-w-0">
                   <div className="text-[13px] font-medium truncate flex items-center gap-2">
                     <span>{selectedFile ? selectedFile.name : (isZh ? '文件预览' : 'File preview')}</span>
-                    {isDirty && <span className="text-[10px] px-1.5 py-0.5 rounded border border-[#C6613F]/30 text-[#C6613F]">{isZh ? '未保存' : 'Unsaved'}</span>}
+                    {isDirty && <span className="rounded border border-[#C6613F]/30 px-1.5 py-0.5 text-[10px] text-[#C6613F]">{isZh ? '未保存' : 'Unsaved'}</span>}
                   </div>
                   <div className="text-[11px] text-claude-textSecondary truncate">
-                    {selectedFile ? getRelativePath(workspacePath, selectedFile.path) : (isZh ? '从左侧选择一个文件' : 'Select a file from the left')}
+                    {selectedFile ? getRelativePath(workspacePath, selectedFile.path) : (isZh ? '先从左侧选一个文件' : 'Select a file from the left')}
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
                   {selectedFile && (
                     <>
+                      <button
+                        type="button"
+                        onClick={askAboutSelectedFile}
+                        className="h-7 rounded-lg border border-claude-border px-2.5 text-[11px] font-medium text-claude-textSecondary transition-colors hover:bg-claude-hover hover:text-claude-text"
+                      >
+                        {isZh ? '问 Claude' : 'Ask Claude'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!selectedFileRelativePath) return;
+                          sendEmbeddedAssistantPromptWithContext(
+                            isZh
+                              ? `请检查当前文件“${selectedFileRelativePath}”里的按钮、标题、提示语和说明文案，把还没汉化的内容改成自然的简体中文，并先告诉我你准备改哪里。`
+                              : `Inspect "${selectedFileRelativePath}" for untranslated copy, convert it to natural Simplified Chinese, and tell me what you would change first.`,
+                          );
+                        }}
+                        className="h-7 rounded-lg border border-claude-border px-2.5 text-[11px] font-medium text-claude-textSecondary transition-colors hover:bg-claude-hover hover:text-claude-text"
+                      >
+                        {isZh ? '翻译文案' : 'Translate copy'}
+                      </button>
                       <span className="text-[11px] text-claude-textSecondary">{formatBytes(selectedFile.size)}</span>
                       {isEditableFile && (
                         <button onClick={() => setShowDiff(prev => !prev)} disabled={!isDirty} className={`p-1.5 rounded-md hover:bg-claude-hover disabled:opacity-40 disabled:cursor-not-allowed ${showDiff ? 'text-[#2E7CF6]' : 'text-claude-textSecondary'}`} title={isZh ? '差异预览' : 'Diff preview'}>
@@ -1470,7 +2338,7 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
                         </button>
                       )}
                       {isEditableFile && (
-                        <button onClick={revertEditorChanges} disabled={!isDirty} className="p-1.5 rounded-md hover:bg-claude-hover text-claude-textSecondary disabled:opacity-40 disabled:cursor-not-allowed" title={isZh ? '撤销当前文件未保存修改' : 'Discard unsaved changes'}>
+                        <button onClick={revertEditorChanges} disabled={!isDirty} className="p-1.5 rounded-md hover:bg-claude-hover text-claude-textSecondary disabled:opacity-40 disabled:cursor-not-allowed" title={isZh ? '丢弃未保存改动' : 'Discard unsaved changes'}>
                           <Undo2 size={14} />
                         </button>
                       )}
@@ -1503,16 +2371,16 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
               <div className="flex-1 min-h-0 overflow-hidden">
                 {loadingFile ? (
                   <div className="h-full flex items-center justify-center text-[13px] text-claude-textSecondary">
-                    {isZh ? '读取文件中...' : 'Reading file...'}
+                    {isZh ? '正在读取文件...' : 'Reading file...'}
                   </div>
                 ) : selectedFile ? (
                   selectedFile.binary ? (
                     <div className="h-full flex items-center justify-center px-8">
                       <div className="text-center max-w-[420px]">
                         <File size={30} className="mx-auto text-claude-textSecondary mb-3" />
-                        <div className="text-[15px] font-medium mb-1">{isZh ? '二进制文件' : 'Binary file'}</div>
+                        <div className="mb-1 text-[15px] font-medium">{isZh ? '二进制文件' : 'Binary file'}</div>
                         <p className="text-[13px] text-claude-textSecondary leading-6">
-                          {isZh ? '这个文件不会在预览区展开。图片、PDF 等专门查看器可以放到后续版本。' : 'This file is not expanded in the preview. Image/PDF viewers can be added next.'}
+                          {isZh ? '这个文件不是纯文本，当前只支持查看基本信息，还不能直接在这里编辑。' : 'This file is not plain text, so you can only inspect basic information here for now.'}
                         </p>
                       </div>
                     </div>
@@ -1525,7 +2393,7 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
                     <div className="h-full overflow-auto bg-claude-bg">
                       <div className="sticky top-0 z-10 h-9 px-4 border-b border-claude-border bg-claude-bg/95 backdrop-blur flex items-center justify-between text-[12px]">
                         <span className="text-claude-textSecondary">{isZh ? '差异预览' : 'Diff preview'}</span>
-                        <span className="text-claude-textSecondary">{changedDiffLines === 0 ? (isZh ? '没有差异' : 'No changes') : `${changedDiffLines} ${isZh ? '处变化' : 'changed lines'}`}</span>
+                        <span className="text-claude-textSecondary">{changedDiffLines === 0 ? (isZh ? '没有改动' : 'No changes') : `${changedDiffLines} ${isZh ? '处改动' : 'changed lines'}`}</span>
                       </div>
                       <div className="font-mono text-[11px] leading-5">
                         {diffLines.map((line, index) => (
@@ -1548,365 +2416,362 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
                       </div>
                     </div>
                   ) : (
-                    <textarea
-                      value={editorContent}
-                      onChange={(e) => setEditorContent(e.target.value)}
-                      onKeyDown={(e) => {
-                        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
-                          e.preventDefault();
-                          saveSelectedFile();
-                        }
-                      }}
-                      spellCheck={false}
-                      className="w-full h-full resize-none bg-transparent p-4 text-[12px] leading-[1.55] font-mono text-claude-text outline-none"
-                    />
+                    <div className="relative h-full w-full overflow-hidden bg-[#1E1E1E]">
+                      <div
+                        ref={editorScrollRef}
+                        className="pointer-events-none absolute inset-0 overflow-auto"
+                      >
+                        <SyntaxHighlighter
+                          // @ts-expect-error style typing from dependency
+                          style={editorSyntaxTheme}
+                          language={codeLanguage}
+                          showLineNumbers
+                          wrapLongLines
+                          customStyle={{
+                            margin: 0,
+                            minHeight: '100%',
+                            background: '#1E1E1E',
+                            padding: '16px',
+                          }}
+                          lineNumberStyle={{
+                            minWidth: '2.75em',
+                            color: '#6A9955',
+                            opacity: 0.9,
+                            paddingRight: '18px',
+                            userSelect: 'none',
+                          }}
+                          codeTagProps={{
+                            style: {
+                              fontFamily: 'Consolas, "Cascadia Code", "Courier New", monospace',
+                              fontSize: '12px',
+                              lineHeight: 1.65,
+                            },
+                          }}
+                        >
+                          {editorContent || ' '}
+                        </SyntaxHighlighter>
+                      </div>
+                      <textarea
+                        ref={editorTextareaRef}
+                        value={editorContent}
+                        onChange={(e) => setEditorContent(e.target.value)}
+                        onScroll={(e) => {
+                          if (!editorScrollRef.current) return;
+                          editorScrollRef.current.scrollTop = e.currentTarget.scrollTop;
+                          editorScrollRef.current.scrollLeft = e.currentTarget.scrollLeft;
+                        }}
+                        onKeyDown={(e) => {
+                          if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+                            e.preventDefault();
+                            saveSelectedFile();
+                          }
+                        }}
+                        spellCheck={false}
+                        className="absolute inset-0 h-full w-full resize-none bg-transparent p-4 font-mono text-[12px] leading-[1.65] text-transparent caret-[#E8E8E8] outline-none selection:bg-[#264F78]"
+                      />
+                    </div>
                   )
                 ) : (
-                  <div className="h-full flex items-center justify-center px-8">
-                    <div className="text-center max-w-[440px]">
-                      <File size={30} className="mx-auto text-claude-textSecondary mb-3" />
-                      <div className="text-[15px] font-medium mb-1">{isZh ? '预览并编辑代码文件' : 'Preview and edit code files'}</div>
-                      <p className="text-[13px] text-claude-textSecondary leading-6">
-                        {isZh ? '这已经是 Code 模式的第二层：文件树、编辑保存、Git 状态和命令面板都集中在一个工作区里。' : 'This is the second Code layer: file tree, editing, Git status, and command output in one workspace.'}
-                      </p>
-                    </div>
-                    {false ? (
-                      <div className="mt-3 border-t border-claude-border/70 pt-3">
-                        <div className="mb-2 flex items-center justify-between">
-                          <div className="text-[11px] font-medium text-claude-text">{isZh ? '修复建议' : 'Recommended fixes'}</div>
-                          <div className="text-[10px] text-claude-textSecondary">{workspaceHealth.fixes.length}</div>
+                  <div className="h-full bg-[#181818] text-[#C7C7C7]">
+                    <div className="flex h-full items-center justify-center px-8">
+                      <div className="w-full max-w-[520px] text-center">
+                        <File size={28} className="mx-auto mb-4 text-[#6F6F6F]" />
+                        <div className="text-[18px] font-semibold text-[#E8E8E8]">
+                          {isZh ? '这里会显示你打开的文件' : 'Open a file to start editing'}
                         </div>
-                        <div className="space-y-2">
-                          {workspaceHealth.fixes.slice(0, 3).map((fix) => (
-                            <div key={fix.id} className="rounded-md border border-claude-border/70 bg-claude-bg/60 px-2.5 py-2">
-                              <div className="flex items-start justify-between gap-2">
-                                <div className="min-w-0">
-                                  <div className="flex items-center gap-2">
-                                    <span className={`rounded border px-1.5 py-0.5 text-[10px] ${healthFixToneClass(fix.severity)}`}>
-                                      {fix.severity === 'error'
-                                        ? (isZh ? '阻塞' : 'Blocking')
-                                        : fix.severity === 'warning'
-                                          ? (isZh ? '建议处理' : 'Recommended')
-                                          : (isZh ? '可优化' : 'Nice to have')}
-                                    </span>
-                                    <span className="truncate text-[11px] font-medium text-claude-text">{fix.title}</span>
-                                  </div>
-                                  <div className="mt-1 text-[10px] leading-5 text-claude-textSecondary">{fix.detail}</div>
-                                  {fix.command ? (
-                                    <code className="mt-1 block truncate text-[10px] text-claude-textSecondary" title={fix.command}>
-                                      {fix.command}
-                                    </code>
-                                  ) : null}
-                                </div>
-                                {fix.command ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => setCommand(fix.command || '')}
-                                    className="shrink-0 rounded-md border border-claude-border px-2 py-1 text-[10px] text-claude-textSecondary hover:bg-claude-hover"
-                                    title={isZh ? '填入命令框' : 'Fill command box'}
-                                  >
-                                    {isZh ? '填入' : 'Use'}
-                                  </button>
-                                ) : null}
-                              </div>
-                            </div>
-                          ))}
+                        <p className="mx-auto mt-3 max-w-[480px] text-[13px] leading-7 text-[#9D9D9D]">
+                          {isZh
+                            ? '左边选文件，中间看内容，右边直接和 Claude 对话。你可以直接说“帮我改这个页面”或者“先解释这个项目是干嘛的”。'
+                            : 'Pick a file on the left, review it here, and talk to Claude on the right.'}
+                        </p>
+                        <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+                          <button
+                            type="button"
+                            onClick={chooseWorkspace}
+                            className="h-9 rounded-lg border border-[#3C3C3C] bg-[#252526] px-4 text-[12px] font-medium text-[#E8E8E8] hover:bg-[#2B2B2C]"
+                          >
+                            {isZh ? '切换项目目录' : 'Choose workspace'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => sendEmbeddedAssistantPromptWithContext(workspaceAssistantPrompts[0]?.prompt || (isZh ? '先帮我看懂这个项目。' : 'Help me understand this project first.'))}
+                            className="h-9 rounded-lg border border-[#3C3C3C] bg-[#1F1F20] px-4 text-[12px] font-medium text-[#C7C7C7] hover:bg-[#29292A]"
+                          >
+                            {isZh ? '让 Claude 先看懂项目' : 'Let Claude inspect the project'}
+                          </button>
                         </div>
                       </div>
-                    ) : null}
+                    </div>
                   </div>
                 )}
               </div>
+              {showBottomPane ? (
+                <>
+                  <div
+                    className="h-1 shrink-0 cursor-row-resize bg-transparent transition-colors hover:bg-[#0E639C]/50"
+                    onMouseDown={(event) => startPaneResize('bottom', event)}
+                  />
+                  <div className="border-t border-claude-border bg-[#181818]" style={{ height: bottomPanelHeight }}>
+                <div className="flex h-9 items-center justify-between gap-1 border-b border-claude-border px-3">
+                  <div className="flex items-center gap-1">
+                  {([
+                    ['problems', isZh ? '问题' : 'Problems'],
+                    ['output', isZh ? '输出' : 'Output'],
+                    ['debug', isZh ? '调试控制台' : 'Debug Console'],
+                    ['terminal', isZh ? '终端' : 'Terminal'],
+                    ['ports', isZh ? '端口' : 'Ports'],
+                  ] as Array<[BottomPanelTab, string]>).map(([tab, label]) => (
+                    <button
+                      key={tab}
+                      type="button"
+                      onClick={() => setActiveBottomTab(tab)}
+                      className={`relative rounded px-2 py-1 text-[12px] transition-colors ${
+                        activeBottomTab === tab
+                          ? 'bg-[#2A2D2E] text-[#FFFFFF] after:absolute after:left-2 after:right-2 after:bottom-[-7px] after:h-[2px] after:bg-[#0E70C0] after:content-[\"\"]'
+                          : 'text-[#9D9D9D] hover:bg-[#252526] hover:text-[#E8E8E8]'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                  </div>
+                  <div className="flex items-center gap-2 text-[#8B8B8B]">
+                    <button
+                      type="button"
+                      onClick={() => setShowBottomPane(false)}
+                      className="rounded-md p-1.5 hover:bg-[#252526] hover:text-[#E8E8E8]"
+                      title={isZh ? '隐藏底部面板' : 'Hide bottom panel'}
+                    >
+                      <X size={13} />
+                    </button>
+                  </div>
+                </div>
+                <div className="h-[calc(100%-36px)] overflow-hidden">
+                  {renderBottomPanel()}
+                </div>
+              </div>
+                </>
+              ) : null}
             </main>
 
-            <aside className="border-l border-claude-border min-h-0 flex flex-col">
-              <div className="h-[42px] px-4 border-b border-claude-border flex items-center justify-between">
-                <div>
-                  <div className="text-[13px] font-medium">{isZh ? '工作区控制台' : 'Workspace console'}</div>
-                  <div className="text-[11px] text-claude-textSecondary">{isZh ? 'Git 与命令输出' : 'Git and command output'}</div>
+            {showRightPane ? (
+              <>
+                <div
+                  className="w-1 shrink-0 cursor-col-resize bg-transparent transition-colors hover:bg-[#0E639C]/50"
+                  onMouseDown={(event) => startPaneResize('right', event)}
+                />
+                <aside className="border-l border-claude-border min-h-0 flex flex-col shrink-0 bg-[#181818]" style={{ width: rightPaneWidth }}>
+              <input
+                ref={assistantFileInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={handleAssistantFileUpload}
+              />
+              <div className="border-b border-claude-border">
+                <div className="flex h-8 items-center gap-1 px-3 text-[#9A9A9A]">
+                  <button type="button" className="rounded p-1 hover:bg-[#252526] hover:text-[#E8E8E8]" title={isZh ? '切换侧栏' : 'Toggle sidebar'}>
+                    <div className="grid h-3.5 w-3.5 grid-cols-[1fr_1fr] gap-[2px]">
+                      <span className="rounded-sm bg-current opacity-90" />
+                      <span className="rounded-sm bg-current opacity-50" />
+                    </div>
+                  </button>
+                  <button type="button" className="rounded p-1 hover:bg-[#252526] hover:text-[#E8E8E8]" title={isZh ? 'AI 面板' : 'AI panel'}>
+                    <MessageSquareText size={13} />
+                  </button>
+                  <button type="button" className="rounded p-1 hover:bg-[#252526] hover:text-[#E8E8E8]" title={isZh ? '对话模式' : 'Chat mode'}>
+                    <Ellipsis size={13} />
+                  </button>
                 </div>
+                <div className="h-[42px] px-3 flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.12em] text-[#9A9A9A]">
+                    <MessageSquareText size={13} />
+                    <span>CLAUDE CODE</span>
+                  </div>
                 <div className="flex items-center gap-1">
-                  <button onClick={() => refreshGitStatus()} className="p-1.5 rounded-md hover:bg-claude-hover text-claude-textSecondary" title={isZh ? '刷新 Git' : 'Refresh Git'}>
-                    <RefreshCw size={14} className={loadingGit ? 'animate-spin' : ''} />
-                  </button>
-                  <button onClick={openWorkspaceFolder} className="p-1.5 rounded-md hover:bg-claude-hover text-claude-textSecondary" title={isZh ? '在资源管理器打开' : 'Open in Explorer'}>
-                    <ExternalLink size={14} />
-                  </button>
-                </div>
-              </div>
-
-              <div className="p-3 border-b border-claude-border space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="text-[12px] font-medium">{isZh ? '工作区健康检查' : 'Workspace health'}</div>
                   <button
                     type="button"
-                    onClick={() => refreshWorkspaceHealth()}
-                    className="p-1.5 rounded-md hover:bg-claude-hover text-claude-textSecondary"
-                    title={isZh ? '重新检查' : 'Check again'}
+                    onClick={() => refreshGitStatus()}
+                    className="rounded-md p-1.5 text-[#8B8B8B] transition-colors hover:bg-[#252526] hover:text-[#E8E8E8]"
+                    title={isZh ? '刷新状态' : 'Refresh'}
                   >
-                    <RefreshCw size={13} className={loadingHealth ? 'animate-spin' : ''} />
+                    <RefreshCw size={13} className={loadingGit ? 'animate-spin' : ''} />
+                  </button>
+                  {assistantConversationId ? (
+                    <button
+                      type="button"
+                      onClick={() => navigate(`/chat/${assistantConversationId}`)}
+                      className="rounded-md p-1.5 text-[#8B8B8B] transition-colors hover:bg-[#252526] hover:text-[#E8E8E8]"
+                      title={isZh ? '打开完整聊天页' : 'Open full chat'}
+                    >
+                      <ExternalLink size={13} />
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => setShowRightPane(false)}
+                    className="rounded-md p-1.5 text-[#8B8B8B] transition-colors hover:bg-[#252526] hover:text-[#E8E8E8]"
+                    title={isZh ? '隐藏右侧面板' : 'Hide right panel'}
+                  >
+                    <X size={13} />
                   </button>
                 </div>
-                {workspaceHealth ? (
-                  <div className="rounded-md border border-claude-border bg-claude-input px-3 py-2">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-[22px] font-semibold text-claude-text">{workspaceHealth.score}</div>
-                      <div className="min-w-0 text-right">
-                        <div className="text-[12px] text-claude-text truncate">{workspaceHealth.projectType}</div>
-                        <div className="text-[10px] text-claude-textSecondary truncate">{workspaceHealth.packageManager || (isZh ? '未检测到包管理器' : 'No package manager')}</div>
-                      </div>
-                    </div>
-                    <div className="mt-2 space-y-1.5">
-                      {workspaceHealth.checks.slice(0, 6).map((check) => (
-                        <div key={check.id} className="flex items-start gap-2 text-[11px] leading-5">
-                          <span className={`mt-1.5 h-1.5 w-1.5 rounded-full shrink-0 ${check.status === 'ok' ? 'bg-emerald-400' : check.status === 'warning' ? 'bg-amber-300' : 'bg-[#C6613F]'}`} />
-                          <div className="min-w-0">
-                            <span className={healthToneClass(check.status)}>{check.label}</span>
-                            <span className="text-claude-textSecondary"> · {check.detail}</span>
+              </div>
+              </div>
+
+              <div className="border-b border-claude-border px-3 py-2 text-[11px] text-[#8B8B8B]">
+                <div className="truncate">{selectedFile ? selectedFile.name : (isZh ? '未命名对话' : 'Untitled')}</div>
+                <div className="mt-1 truncate">{workspacePath || (isZh ? '还没有选择项目目录' : 'No workspace selected')}</div>
+              </div>
+
+              <div className="flex-1 min-h-0 overflow-y-auto">
+                {assistantConversationLoading ? (
+                  <div className="px-4 py-4 text-[12px] text-[#9D9D9D]">{isZh ? '正在加载侧边对话...' : 'Loading the side conversation...'}</div>
+                ) : assistantMessages.length > 0 ? (
+                  <div className="divide-y divide-[#2A2A2A]">
+                    {assistantMessages.map((message, index) => {
+                      const codeBlocks = message.role === 'assistant' ? extractCodeBlocks(message.content) : [];
+                      const primaryCodeBlock = codeBlocks[0] || '';
+                      const cleanContent = stripThinkTags(message.content);
+                      return (
+                        <div key={message.id || `${message.role}-${index}`} className="px-4 py-4">
+                          <div className="mb-2 flex items-center justify-between gap-3 text-[10px] uppercase tracking-[0.08em] text-[#8B8B8B]">
+                            <span className={message.role === 'user' ? 'text-[#9CDCFE]' : 'text-[#D7BA7D]'}>{message.role === 'user' ? (isZh ? '你' : 'You') : 'Claude'}</span>
+                            {message.isThinking ? <span className="text-[#D7BA7D]">{isZh ? '思考中…' : 'Thinking…'}</span> : null}
                           </div>
-                        </div>
-                      ))}
-                    </div>
-                    {workspaceHealth.fixes?.length ? (
-                      <div className="mt-3 border-t border-claude-border/70 pt-3">
-                        <div className="mb-2 flex items-center justify-between">
-                          <div className="text-[11px] font-medium text-claude-text">{isZh ? '修复建议' : 'Recommended fixes'}</div>
-                          <div className="text-[10px] text-claude-textSecondary">{workspaceHealth.fixes.length}</div>
-                        </div>
-                        <div className="space-y-2">
-                          {workspaceHealth.fixes.slice(0, 3).map((fix) => (
-                            <div key={fix.id} className="rounded-md border border-claude-border/70 bg-claude-bg/60 px-2.5 py-2">
-                              <div className="flex items-start justify-between gap-2">
-                                <div className="min-w-0">
-                                  <div className="flex items-center gap-2">
-                                    <span className={`rounded border px-1.5 py-0.5 text-[10px] ${healthFixToneClass(fix.severity)}`}>
-                                      {fix.severity === 'error'
-                                        ? (isZh ? '阻塞' : 'Blocking')
-                                        : fix.severity === 'warning'
-                                          ? (isZh ? '建议处理' : 'Recommended')
-                                          : (isZh ? '可优化' : 'Nice to have')}
-                                    </span>
-                                    <span className="truncate text-[11px] font-medium text-claude-text">{fix.title}</span>
-                                  </div>
-                                  <div className="mt-1 text-[10px] leading-5 text-claude-textSecondary">{fix.detail}</div>
-                                  {fix.command ? (
-                                    <code className="mt-1 block truncate text-[10px] text-claude-textSecondary" title={fix.command}>
-                                      {fix.command}
-                                    </code>
-                                  ) : null}
+                          {message.role === 'assistant' ? (
+                            <div className={`text-[13px] leading-7 ${message.error ? 'text-[#F48771]' : 'text-[#D4D4D4]'}`}>
+                              {cleanContent ? renderAssistantMarkdown(cleanContent) : null}
+                              {message.isThinking && message.thinking ? (
+                                <div className="mt-3 flex items-center gap-2 font-mono text-[12px] text-[#D7BA7D]">
+                                  <Ellipsis size={14} />
+                                  <span>{isZh ? 'Thinking…' : 'Thinking…'}</span>
                                 </div>
-                                {fix.command ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => setCommand(fix.command || '')}
-                                    className="shrink-0 rounded-md border border-claude-border px-2 py-1 text-[10px] text-claude-textSecondary hover:bg-claude-hover"
-                                    title={isZh ? '填入命令框' : 'Fill command box'}
-                                  >
-                                    {isZh ? '填入' : 'Use'}
-                                  </button>
-                                ) : null}
-                              </div>
+                              ) : null}
                             </div>
-                          ))}
+                          ) : (
+                            <div className="rounded-md border border-[#2A2A2A] bg-[#1F1F20] px-3 py-2 text-[13px] leading-7 text-[#E8E8E8] whitespace-pre-wrap break-words">{message.content}</div>
+                          )}
+                          {!message.isThinking && (cleanContent || message.content) ? (
+                            <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
+                              <button
+                                type="button"
+                                onClick={() => copyToClipboard(cleanContent || message.content)}
+                                className="rounded border border-[#3A3A3A] px-2 py-1 text-[#9CDCFE] hover:bg-[#252526]"
+                              >
+                                {isZh ? '复制回复' : 'Copy reply'}
+                              </button>
+                              {message.role === 'assistant' ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setAssistantDraft(`${isZh ? '继续处理：' : 'Continue with:'}\n${cleanContent || message.content}`)}
+                                  className="rounded border border-[#3A3A3A] px-2 py-1 text-[#9CDCFE] hover:bg-[#252526]"
+                                >
+                                  {isZh ? '继续追问' : 'Continue'}
+                                </button>
+                              ) : null}
+                              {message.role === 'assistant' && primaryCodeBlock && isEditableFile ? (
+                                <button
+                                  type="button"
+                                  onClick={() => applyAssistantCodeToEditor(primaryCodeBlock)}
+                                  className="rounded border border-[#2D7D46] px-2 py-1 text-[#89D185] hover:bg-[#1D2A20]"
+                                >
+                                  {isZh ? '应用到当前文件' : 'Apply to current file'}
+                                </button>
+                              ) : null}
+                            </div>
+                          ) : null}
                         </div>
-                      </div>
-                    ) : null}
+                      );
+                    })}
                   </div>
                 ) : (
-                  <div className="rounded-md border border-dashed border-claude-border px-3 py-3 text-[12px] leading-5 text-claude-textSecondary">
-                    {loadingHealth ? (isZh ? '正在检查工作区...' : 'Checking workspace...') : (isZh ? '还没有健康检查结果。' : 'No health check result yet.')}
+                  <div className="flex h-full min-h-[320px] flex-col items-center justify-center px-8 text-center">
+                    <MessageSquareText size={34} className="mb-4 text-[#D7BA7D]" />
+                    <div className="text-[30px] font-semibold text-[#E8E8E8]">{isZh ? '准备开始写代码？' : 'Ready to code?'}</div>
+                    <p className="mt-3 max-w-[320px] text-[14px] leading-7 text-[#9D9D9D]">
+                      {isZh ? '像 VS Code 侧边栏一样，直接在这里提需求、上传文件或补充上下文。' : 'Work with Claude here. Upload files, add context, or ask it to explain and modify the current project.'}
+                    </p>
                   </div>
                 )}
+                {assistantError ? (
+                  <div className="border-t border-[#472B28] px-4 py-3 text-[11px] text-[#F48771]">{assistantError}</div>
+                ) : null}
               </div>
 
-              <div className="p-3 border-b border-claude-border space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="text-[12px] font-medium">{isZh ? 'Git 状态' : 'Git status'}</div>
-                  <div className="text-[10px] text-claude-textSecondary truncate max-w-[190px]">
-                    {gitStatus?.repoRoot ? getRelativePath(workspacePath, gitStatus.repoRoot) : ''}
-                  </div>
-                </div>
-                {renderGitStatus()}
-              </div>
-
-              <div className="p-3 border-b border-claude-border">
-                <div className={`mb-2 rounded-md border px-3 py-2 text-[12px] leading-5 ${permissionMode === 'full_access' ? 'border-[#C6613F]/30 bg-[#C6613F]/10 text-[#C6613F]' : permissionMode === 'project' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-500' : 'border-claude-border bg-claude-input text-claude-textSecondary'}` }>
-                  {getPermissionCopy(permissionMode, isZh).desc}
-                </div>
-                <div className="mb-2 rounded-md border border-claude-border bg-claude-input px-3 py-2 text-[11px] leading-5 text-claude-textSecondary">
-                  {isZh
-                    ? '这里是命令控制台，不是聊天输入框。适合输入 dir、git status、npm test 这类终端命令；如果想让模型分析代码，请回到“聊天”页并把工作区内容附加进去。'
-                    : 'This is the command console, not a chat box. Use it for commands like dir, git status, or npm test. If you want model analysis, go back to Chat and attach workspace context there.'}
-                </div>
-                <textarea
-                  value={command}
-                  onChange={(e) => setCommand(e.target.value)}
-                  onKeyDown={(e) => {
-                    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') submitCommand();
-                  }}
-                  placeholder={isZh ? '输入命令，例如：dir 或 npm test' : 'Enter a command, e.g. dir or npm test'}
-                  className="w-full h-20 resize-none rounded-md border border-claude-border bg-claude-input px-3 py-2 text-[12px] font-mono outline-none focus:border-[#2E7CF6]/70"
-                />
-                <div className="mt-2">
-                  <div className="mb-1.5 flex items-center justify-between">
-                    <span className="text-[11px] text-claude-textSecondary">{isZh ? '常用命令' : 'Quick commands'}</span>
-                    <span className="text-[10px] text-claude-textSecondary">
-                      {localStorage.getItem('integrated_shell') || 'powershell'}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {commandQuickActions.map((item) => (
-                      <button
-                        key={item.command}
-                        type="button"
-                        onClick={() => setCommand(item.command)}
-                        disabled={permissionMode === 'workspace_write'}
-                        className="min-h-8 rounded-md border border-claude-border bg-claude-input px-2 py-1 text-left hover:bg-claude-hover disabled:opacity-40 disabled:cursor-not-allowed"
-                        title={`${item.desc}: ${item.command}`}
-                      >
-                        <div className="text-[11px] text-claude-text truncate">{item.label}</div>
-                        <div className="text-[10px] text-claude-textSecondary font-mono truncate">{item.command}</div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                {recentCommands.length > 0 && (
-                  <div className="mt-2 space-y-2">
-                    <div className="text-[11px] text-claude-textSecondary">{isZh ? '最近命令' : 'Recent commands'}</div>
-                    <div className="space-y-1.5">
-                      {recentCommands.map((item) => (
-                        <div key={item} className="flex items-center gap-1.5">
-                          <button
-                            onClick={() => setCommand(item)}
-                            className="min-w-0 flex-1 h-7 rounded-md border border-claude-border bg-claude-input px-2 text-left text-[11px] text-claude-textSecondary hover:bg-claude-hover truncate"
-                            title={item}
-                          >
-                            {item}
-                          </button>
-                          <button
-                            onClick={() => submitCommand(item)}
-                            disabled={runningCommand || permissionMode === 'workspace_write'}
-                            className="h-7 w-8 shrink-0 rounded-md border border-claude-border text-claude-textSecondary hover:bg-claude-hover disabled:opacity-40"
-                            title={isZh ? '重新执行' : 'Run again'}
-                          >
-                            <Play size={12} className="mx-auto" />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                <button
-                  onClick={submitCommand}
-                  disabled={!command.trim() || runningCommand || permissionMode === 'workspace_write'}
-                  className="mt-2 h-8 w-full rounded-md bg-claude-text text-claude-bg text-[12px] font-medium flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <Play size={13} />
-                  {permissionMode === 'workspace_write'
-                    ? (isZh ? '切到项目权限后可执行命令' : 'Switch to Project to run commands')
-                    : runningCommand
-                      ? (isZh ? '执行中...' : 'Running...')
-                      : (isZh ? '执行命令 Ctrl+Enter' : 'Run command Ctrl+Enter')}
-                </button>
-                {commandAudit.length > 0 && (
-                  <div className="mt-3 rounded-md border border-claude-border bg-claude-input px-3 py-2">
-                    <div className="mb-2 flex items-center justify-between text-[11px] text-claude-textSecondary">
-                      <span>{isZh ? '命令审计' : 'Command audit'}</span>
-                      <div className="flex items-center gap-2">
-                        <button type="button" onClick={exportCommandAudit} className="hover:text-claude-text disabled:opacity-50" disabled={!filteredCommandAudit.length}>
-                          {isZh ? '导出' : 'Export'}
-                        </button>
-                        <button type="button" onClick={() => refreshCommandAudit()} className="hover:text-claude-text">
-                          {isZh ? '刷新' : 'Refresh'}
+              <div className="border-t border-claude-border bg-[#181818] px-3 py-3">
+                {assistantAttachments.length ? (
+                  <div className="mb-2 flex flex-wrap gap-2">
+                    {assistantAttachments.map((item) => (
+                      <div key={item.id} className="flex items-center gap-2 rounded border border-[#3A3A3A] bg-[#1F1F20] px-2 py-1 text-[11px] text-[#D4D4D4]">
+                        <span className="max-w-[170px] truncate">{item.name}</span>
+                        <button type="button" onClick={() => removeAssistantAttachment(item.id)} className="text-[#8B8B8B] hover:text-[#E8E8E8]">
+                          <X size={12} />
                         </button>
                       </div>
-                    </div>
-                    <div className="mb-2 grid grid-cols-2 gap-2">
-                      <select
-                        value={auditDecisionFilter}
-                        onChange={(event) => setAuditDecisionFilter(event.target.value as typeof auditDecisionFilter)}
-                        className="h-8 rounded-md border border-claude-border bg-claude-bg px-2 text-[11px] text-claude-text outline-none"
+                    ))}
+                  </div>
+                ) : null}
+                <div className="rounded-xl border border-[#3A3A3A] bg-[#1E1E1E]">
+                  <textarea
+                    value={assistantDraft}
+                    onChange={(e) => setAssistantDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                        e.preventDefault();
+                        sendEmbeddedAssistantMessage();
+                      }
+                    }}
+                    placeholder={isZh ? '直接输入：帮我把这个页面改成简体中文，并让主按钮更明显。' : 'Type your request here.'}
+                    className="h-28 w-full resize-none bg-transparent px-3 py-3 text-[13px] leading-7 text-[#E8E8E8] outline-none placeholder:text-[#6A6A6A]"
+                  />
+                  <div className="flex items-center justify-between border-t border-[#2A2A2A] px-3 py-2">
+                    <div className="relative flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowAssistantMenu((prev) => !prev)}
+                        className="rounded-md p-1.5 text-[#BEBEBE] hover:bg-[#252526] hover:text-[#FFFFFF]"
+                        title={isZh ? '添加附件或上下文' : 'Add attachment or context'}
                       >
-                        <option value="all">{isZh ? '全部决策' : 'All decisions'}</option>
-                        <option value="approval_required">{isZh ? '待审批' : 'Approval required'}</option>
-                        <option value="approved">{isZh ? '已批准' : 'Approved'}</option>
-                        <option value="blocked">{isZh ? '已阻止' : 'Blocked'}</option>
-                        <option value="denied">{isZh ? '已拒绝' : 'Denied'}</option>
-                        <option value="completed">{isZh ? '已完成' : 'Completed'}</option>
-                        <option value="failed">{isZh ? '失败' : 'Failed'}</option>
-                      </select>
-                      <select
-                        value={auditRiskFilter}
-                        onChange={(event) => setAuditRiskFilter(event.target.value as typeof auditRiskFilter)}
-                        className="h-8 rounded-md border border-claude-border bg-claude-bg px-2 text-[11px] text-claude-text outline-none"
+                        <Upload size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={addCurrentFileAsContext}
+                        className="rounded-md border border-[#3A3A3A] px-2 py-1 text-[11px] text-[#9CDCFE] hover:bg-[#252526]"
                       >
-                        <option value="all">{isZh ? '全部风险' : 'All risks'}</option>
-                        <option value="low">{isZh ? '低风险' : 'Low risk'}</option>
-                        <option value="medium">{isZh ? '中风险' : 'Medium risk'}</option>
-                        <option value="high">{isZh ? '高风险' : 'High risk'}</option>
-                      </select>
-                    </div>
-                    <div className="space-y-1.5">
-                      {filteredCommandAudit.slice(0, 8).map((entry) => (
-                        <div key={entry.id} className="grid grid-cols-[74px_64px_minmax(0,1fr)] items-center gap-2 text-[10px]">
-                          <span className={`rounded border px-1.5 py-0.5 text-center ${riskToneClass(entry.risk?.level)}`}>
-                            {entry.decision === 'approval_required' ? (isZh ? '待确认' : 'Approval') : entry.decision}
-                          </span>
-                          <span className="rounded border border-claude-border px-1.5 py-0.5 text-center text-claude-textSecondary">
-                            {entry.risk?.level || 'low'}
-                          </span>
-                          <span className="truncate font-mono text-claude-textSecondary" title={entry.command}>
-                            {entry.command}
-                          </span>
-                        </div>
-                      ))}
-                      {filteredCommandAudit.length === 0 ? (
-                        <div className="text-[10px] text-claude-textSecondary">
-                          {isZh ? '当前筛选条件下没有命令审计记录。' : 'No command audit entries match the current filters.'}
+                        {isZh ? '添加上下文' : 'Add context'}
+                      </button>
+                      {showAssistantMenu ? (
+                        <div className="absolute bottom-10 left-0 z-20 min-w-[180px] overflow-hidden rounded-lg border border-[#3A3A3A] bg-[#252526] shadow-2xl">
+                          <button type="button" onClick={openAssistantUpload} className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] text-[#E8E8E8] hover:bg-[#2D2D30]">
+                            <Upload size={13} />
+                            {isZh ? '从电脑上传' : 'Upload from computer'}
+                          </button>
+                          <button type="button" onClick={addCurrentFileAsContext} className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] text-[#E8E8E8] hover:bg-[#2D2D30]">
+                            <File size={13} />
+                            {isZh ? '添加当前文件上下文' : 'Add current file context'}
+                          </button>
                         </div>
                       ) : null}
                     </div>
-                  </div>
-                )}
-              </div>
-              <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
-                {commandHistory.length === 0 ? (
-                  <div className="text-[12px] text-claude-textSecondary leading-6">
-                    {isZh ? '命令和 Git 操作结果会显示在这里。' : 'Command and Git action output appears here.'}
-                  </div>
-                ) : commandHistory.map((item, index) => (
-                  <div key={`${item.command}-${index}`} className="rounded-md border border-claude-border bg-claude-input overflow-hidden">
-                    <div className="px-3 py-2 border-b border-claude-border space-y-1.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <code className="text-[11px] truncate text-claude-text">{item.command}</code>
-                        <span className={`text-[10px] shrink-0 ${item.isError ? 'text-[#C6613F]' : 'text-claude-textSecondary'}`}>
-                          {item.timedOut ? (isZh ? '超时' : 'timeout') : item.isError ? (isZh ? '错误' : 'error') : 'ok'} · {formatDuration(item.durationMs)}
-                        </span>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-claude-textSecondary">
-                        {item.shell && <span className="rounded border border-claude-border px-1.5 py-0.5">{item.shell}</span>}
-                        {typeof item.exitCode === 'number' && <span className="rounded border border-claude-border px-1.5 py-0.5">exit {item.exitCode}</span>}
-                        {item.permissionMode && <span className="rounded border border-claude-border px-1.5 py-0.5">{getPermissionCopy(item.permissionMode as PermissionMode, isZh).label}</span>}
-                        {item.risk && item.risk.level !== 'normal' && (
-                          <span className={`rounded border px-1.5 py-0.5 ${riskToneClass(item.risk.level)}`}>
-                            {formatRiskLabel(item.risk.level, isZh)}
-                          </span>
-                        )}
-                        {item.approved && (
-                          <span className="rounded border border-[#2E7CF6]/40 bg-[#2E7CF6]/10 px-1.5 py-0.5 text-[#6EA8FF]">
-                            {isZh ? '已确认' : 'Approved'}
-                          </span>
-                        )}
-                        <span className="truncate">{item.cwd}</span>
-                      </div>
+                    <div className="flex items-center gap-3">
+                      <span className="text-[10px] text-[#8B8B8B]">{isZh ? 'Ctrl+Enter 发送' : 'Ctrl+Enter to send'}</span>
+                      <button
+                        type="button"
+                        onClick={sendEmbeddedAssistantMessage}
+                        disabled={!assistantDraft.trim() || assistantStreaming}
+                        className="rounded-md bg-[#C96B42] px-3 py-1.5 text-[12px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-45"
+                      >
+                        {assistantStreaming ? (isZh ? '发送中' : 'Sending') : (isZh ? '发送' : 'Send')}
+                      </button>
                     </div>
-                    <pre className="m-0 p-3 text-[11px] leading-5 font-mono whitespace-pre-wrap break-words text-claude-textSecondary max-h-[220px] overflow-auto">
-                      {item.output || (isZh ? '命令没有输出。' : 'The command produced no output.')}
-                    </pre>
                   </div>
-                ))}
+                </div>
               </div>
-            </aside>
+                </aside>
+              </>
+            ) : null}
           </div>
         )}
       </div>
@@ -1922,7 +2787,7 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
                   {isZh ? '需要确认后执行' : 'Approval required'}
                 </div>
                 <div className="mt-1 text-[13px] leading-6 text-claude-textSecondary">
-                  {pendingApproval.approval.message || (isZh ? '这条命令可能会修改项目或影响系统，请确认风险后再执行。' : 'This command may change the project or affect the system. Review it before running.')}
+                  {pendingApproval.approval.message || (isZh ? '这条命令可能会修改项目或影响系统，请先确认后再执行。' : 'This command may change the project or affect the system. Review it before running.')}
                 </div>
               </div>
               <button
@@ -1996,7 +2861,7 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
                       ? (isZh ? `正在重命名 ${workspaceDialog.entry.name}` : `Rename ${workspaceDialog.entry.name}`)
                       : workspaceDialog.kind === 'delete'
                         ? (isZh ? `删除 ${workspaceDialog.entry.name} 后将无法自动恢复。` : `Deleting ${workspaceDialog.entry.name} cannot be automatically undone.`)
-                        : (isZh ? `会丢弃 ${workspaceDialog.entry.name} 当前未提交的 Git 改动。` : `This will discard uncommitted Git changes in ${workspaceDialog.entry.name}.`)}
+                        : (isZh ? `这会丢弃 ${workspaceDialog.entry.name} 当前未提交的 Git 改动。` : `This will discard uncommitted Git changes in ${workspaceDialog.entry.name}.`)}
                 </div>
               </div>
               <button onClick={closeWorkspaceDialog} className="p-1.5 rounded-md text-claude-textSecondary hover:bg-claude-hover hover:text-claude-text">
@@ -2040,8 +2905,8 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
                     : 'border-[#2E7CF6]/30 bg-[#2E7CF6]/10 text-claude-text'
                 }`}>
                   {workspaceDialog.kind === 'delete'
-                    ? (isZh ? '确认后会立即删除该文件或文件夹。' : 'This will delete the file or folder immediately.')
-                    : (isZh ? '确认后会用 Git 版本覆盖当前文件内容。' : 'This will replace the current file with the Git version.')}
+                    ? (isZh ? '删除后无法自动撤销，请确认你真的不再需要这个条目。' : 'Deleting this entry cannot be automatically undone. Please confirm you no longer need it.')
+                    : (isZh ? '这会用 Git 里的版本替换当前文件。' : 'This will replace the current file with the Git version.')}
                 </div>
               </div>
             )}
@@ -2104,3 +2969,5 @@ const CodePage = ({ desktopTabId }: CodePageProps) => {
 };
 
 export default CodePage;
+
+

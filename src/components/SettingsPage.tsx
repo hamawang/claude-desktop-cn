@@ -1422,6 +1422,18 @@ const SettingsPage = ({ onClose }: SettingsPageProps) => {
     }
   };
 
+  const openAnthropicConsoleKeys = () => {
+    const url = 'https://console.anthropic.com/settings/keys';
+    const api = (window as any).electronAPI;
+    if (api?.openExternal) api.openExternal(url);
+    else window.open(url, '_blank');
+  };
+
+  const openApiSetupPage = () => {
+    onClose();
+    navigate('/login');
+  };
+
   const reloadMcpServers = async () => {
     try {
       const data = await getMcpServers();
@@ -2122,7 +2134,7 @@ const SettingsPage = ({ onClose }: SettingsPageProps) => {
             </SectionCard>
 
             {!isSelfHosted && (
-              <SectionCard title="默认模型" subtitle="影响新建聊天默认使用的 Clawparrot 模型。">
+              <SectionCard title="默认模型" subtitle="影响新建聊天默认使用的官方 Anthropic 模型。">
                 <div className="grid grid-cols-[1fr_auto] gap-4 items-end">
                   <div>
                     <div className="text-[13px] text-claude-textSecondary mb-1.5">默认模型</div>
@@ -2190,11 +2202,11 @@ const SettingsPage = ({ onClose }: SettingsPageProps) => {
               </div>
             </SectionCard>
 
-            <SectionCard title="用户模式" subtitle="保留你现在这套自部署 / Clawparrot 双模式切换。">
+            <SectionCard title="用户模式" subtitle="在官方 Anthropic API 和自定义兼容 API 之间切换。">
               <div className="grid grid-cols-2 gap-3">
                 {[
-                  { value: 'selfhosted', label: '自部署', desc: '使用你自己的 API Key 和本地配置' },
-                  { value: 'clawparrot', label: 'Clawparrot', desc: '使用托管 API 服务' },
+                  { value: 'selfhosted', label: '自定义兼容 API', desc: '使用你自己的 Base URL、API Key 和本地配置' },
+                  { value: 'clawparrot', label: '官方 Anthropic API', desc: '直接使用官方 Claude API Key 与官方端点' },
                 ].map((item) => {
                   const active = (localStorage.getItem('user_mode') || 'selfhosted') === item.value;
                   return (
@@ -2210,10 +2222,18 @@ const SettingsPage = ({ onClose }: SettingsPageProps) => {
                           if (nextMode === 'clawparrot') {
                             localStorage.removeItem('CUSTOM_API_KEY');
                             localStorage.removeItem('CUSTOM_BASE_URL');
+                            localStorage.setItem('ANTHROPIC_BASE_URL', 'https://api.anthropic.com');
+                          } else {
+                            localStorage.removeItem('gateway_user');
+                            localStorage.removeItem('gateway_quota');
                           }
                           localStorage.removeItem('cross_mode_overrides');
                         }
-                        window.location.reload();
+                        localStorage.setItem('settings_section', 'account');
+                        setSection('account');
+                        if (nextMode === 'clawparrot' && !localStorage.getItem('ANTHROPIC_API_KEY')) {
+                          openAnthropicConsoleKeys();
+                        }
                       }}
                       className={`rounded-xl border px-4 py-4 text-left transition-all ${
                         active
@@ -2297,7 +2317,7 @@ const SettingsPage = ({ onClose }: SettingsPageProps) => {
       case 'models':
         return (
           <div className="space-y-5">
-            <SectionCard title="模型" subtitle="这里保留自部署模型配置页，作为原生骨架里的模型入口。">
+            <SectionCard title="模型" subtitle="这里保留自定义兼容 API 的模型配置页，作为原生骨架里的模型入口。">
               <ProviderSettings />
             </SectionCard>
           </div>
@@ -3983,7 +4003,7 @@ const SettingsPage = ({ onClose }: SettingsPageProps) => {
                     <InfoStat label={isZh ? '最近对话' : 'Recent chats'} value={recentConversations.length} />
                     <InfoStat label={isZh ? '已启用 Skills' : 'Enabled skills'} value={skillStats.enabled} />
                   </div>
-                  <div className="rounded-xl border border-dashed border-claude-border px-4 py-4 text-[13px] leading-6 text-claude-textSecondary">{isZh ? '自部署模式下，后续可以继续加入本地推理速度、请求数、平均耗时和模型命中率。' : 'In self-hosted mode, good next additions are local inference speed, request counts, average latency, and model hit rate.'}</div>
+                  <div className="rounded-xl border border-dashed border-claude-border px-4 py-4 text-[13px] leading-6 text-claude-textSecondary">{isZh ? '自定义兼容 API 模式下，后续可以继续加入本地推理速度、请求数、平均耗时和模型命中率。' : 'In custom API mode, good next additions are local inference speed, request counts, average latency, and model hit rate.'}</div>
                 </div>
               ) : usage ? (
                 <div className="space-y-4">
@@ -4004,6 +4024,91 @@ const SettingsPage = ({ onClose }: SettingsPageProps) => {
           </div>
         );
       case 'account':
+        return (() => {
+          const currentMode = (localStorage.getItem('user_mode') || 'selfhosted') === 'selfhosted' ? 'custom' : 'official';
+          const anthropicKey = localStorage.getItem('ANTHROPIC_API_KEY') || '';
+          const customKey = localStorage.getItem('CUSTOM_API_KEY') || '';
+          const currentBaseUrl =
+            currentMode === 'official'
+              ? localStorage.getItem('ANTHROPIC_BASE_URL') || 'https://api.anthropic.com'
+              : localStorage.getItem('CUSTOM_BASE_URL') || '';
+          const savedKey = currentMode === 'official' ? anthropicKey : customKey;
+          const hasConfiguredKey = Boolean(savedKey);
+          const maskedKey = hasConfiguredKey ? `${savedKey.slice(0, 8)}...${savedKey.slice(-4)}` : '未配置';
+
+          return (
+            <div className="space-y-5">
+              <SectionCard title="API 配置" subtitle="这里管理官方 Anthropic API 和自定义兼容 API 的连接信息。">
+                <div className="space-y-4 rounded-xl border border-claude-border bg-claude-bg px-4 py-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <div className="mb-1 text-[13px] text-claude-textSecondary">当前模式</div>
+                      <div className="text-[14px] text-claude-text">
+                        {currentMode === 'official' ? '官方 Anthropic API' : '自定义兼容 API'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="mb-1 text-[13px] text-claude-textSecondary">API Key 状态</div>
+                      <div className={`text-[14px] ${hasConfiguredKey ? 'text-[#7BD88F]' : 'text-[#F2C94C]'}`}>
+                        {hasConfiguredKey ? '已配置' : '未配置'}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <div className="mb-1 text-[13px] text-claude-textSecondary">当前端点</div>
+                      <div className="break-all text-[13px] text-claude-text">{currentBaseUrl || '未配置'}</div>
+                    </div>
+                    <div>
+                      <div className="mb-1 text-[13px] text-claude-textSecondary">已保存的 Key</div>
+                      <div className="break-all text-[13px] text-claude-text">{maskedKey}</div>
+                    </div>
+                  </div>
+
+                  {!hasConfiguredKey && (
+                    <div className="rounded-xl border border-[#F2C94C]/25 bg-[#F2C94C]/8 px-4 py-3 text-[13px] leading-6 text-[#F6E3A1]">
+                      {currentMode === 'official'
+                        ? '当前还没有配置官方 API Key。你可以先打开 Anthropic Console 创建密钥，再回到应用里粘贴保存。'
+                        : '当前还没有配置自定义兼容 API。请先填写你的 Base URL 和 API Key。'}
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap gap-3">
+                    {currentMode === 'official' ? (
+                      <button
+                        onClick={openAnthropicConsoleKeys}
+                        className="rounded-lg border border-[#2E7CF6]/30 bg-[#2E7CF6]/10 px-3 py-2 text-[13px] text-[#8AB4FF] hover:bg-[#2E7CF6]/15"
+                      >
+                        打开 Anthropic Console 密钥页
+                      </button>
+                    ) : null}
+                    <button
+                      onClick={openApiSetupPage}
+                      className="rounded-lg border border-claude-border px-3 py-2 text-[13px] text-claude-text hover:bg-claude-hover"
+                    >
+                      重新配置 API
+                    </button>
+                  </div>
+                </div>
+              </SectionCard>
+
+              <SectionCard title="使用说明" subtitle="官方模式和兼容模式的连接方式略有不同。">
+                <div className="space-y-3 rounded-xl border border-claude-border bg-claude-bg px-4 py-4 text-[13px] leading-6 text-claude-textSecondary">
+                  <p>
+                    <span className="text-claude-text">官方 Anthropic API：</span>
+                    使用 Anthropic Console 创建的 API Key，默认端点是 <code>https://api.anthropic.com</code>。
+                  </p>
+                  <p>
+                    <span className="text-claude-text">自定义兼容 API：</span>
+                    适合代理服务、本地网关或兼容端点，需要你自己提供 Base URL 和 API Key。
+                  </p>
+                  <p>点击上面的模式卡片后，应用会保留在设置页，不会再强制退出设置。</p>
+                </div>
+              </SectionCard>
+            </div>
+          );
+        })();
         return (
           <div className="space-y-5">
             <SectionCard title="账号" subtitle="账号安全和会话管理先保留基础版。">

@@ -32,10 +32,10 @@ const formatPermissionLabel = (permissionMode?: string, isZh = true): string => 
     return 'Unknown';
   }
 
-  if (permissionMode === 'workspace_write') return '瀹夊叏妯″紡';
+  if (permissionMode === 'workspace_write') return '安全模式';
   if (permissionMode === 'project') return '项目权限';
-  if (permissionMode === 'full_access') return '瀹屽叏璁块棶';
-  return '鏈煡';
+  if (permissionMode === 'full_access') return '完全访问';
+  return '未知';
 };
 
 type CoworkTaskStatus = 'todo' | 'doing' | 'done';
@@ -151,8 +151,8 @@ const getTimelineGroupLabel = (value: string, isZh: boolean) => {
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const startOfTarget = new Date(target.getFullYear(), target.getMonth(), target.getDate()).getTime();
   const diffDays = Math.floor((startOfToday - startOfTarget) / (24 * 60 * 60 * 1000));
-  if (diffDays <= 0) return isZh ? '浠婂ぉ' : 'Today';
-  if (diffDays === 1) return isZh ? '鏄ㄥぉ' : 'Yesterday';
+  if (diffDays <= 0) return isZh ? '今天' : 'Today';
+  if (diffDays === 1) return isZh ? '昨天' : 'Yesterday';
   return target.toLocaleDateString();
 };
 
@@ -204,6 +204,12 @@ const CoworkPage = ({ desktopTabId }: CoworkPageProps) => {
   const [loading, setLoading] = useState(true);
   const [projectActivities, setProjectActivities] = useState<ProjectActivityItem[]>([]);
   const [projectDocSummaries, setProjectDocSummaries] = useState<ProjectDocSummary[]>([]);
+  const openClaudePrompt = (prompt: string) => {
+    const nextPrompt = prompt.trim();
+    if (!nextPrompt) return;
+    sessionStorage.setItem('prefill_input', nextPrompt);
+    navigate('/');
+  };
 
   const workspacePath = localStorage.getItem('code_workspace_path') || '';
   const [boardTasks, setBoardTasks] = useState<CoworkTask[]>(() => {
@@ -660,6 +666,74 @@ const CoworkPage = ({ desktopTabId }: CoworkPageProps) => {
           </div>
         </div>
 
+        <div className="mb-6 rounded-3xl border border-claude-border bg-claude-input p-6">
+          <div className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
+            <div>
+              <div className="text-[22px] font-semibold text-claude-text">
+                {isZh ? '如果你不会写代码，这页就当成“项目导航页”来用' : 'Use this as a project routing page'}
+              </div>
+              <p className="mt-3 max-w-[720px] text-[14px] leading-7 text-claude-textSecondary">
+                {isZh
+                  ? '协作页不是让你自己研究 Git、命令行或文件树的。它更像一个总览入口：先看项目状态，再决定是去聊天里直接提需求，还是进入代码页让 Claude 帮你改。'
+                  : 'This page is for overview and routing, not for manual Git or terminal work. Use it to decide whether to chat with Claude or enter the code workspace.'}
+              </p>
+              <div className="mt-5 grid gap-3 md:grid-cols-3">
+                <div className="rounded-2xl border border-claude-border bg-claude-bg px-4 py-4">
+                  <div className="text-[12px] text-claude-textSecondary">{isZh ? '第一步' : 'Step 1'}</div>
+                  <div className="mt-2 text-[14px] font-medium text-claude-text">{isZh ? '先看项目是不是你要继续的那个' : 'Confirm the project you want'}</div>
+                </div>
+                <div className="rounded-2xl border border-claude-border bg-claude-bg px-4 py-4">
+                  <div className="text-[12px] text-claude-textSecondary">{isZh ? '第二步' : 'Step 2'}</div>
+                  <div className="mt-2 text-[14px] font-medium text-claude-text">{isZh ? '直接告诉 Claude 你想改什么' : 'Tell Claude what to change'}</div>
+                </div>
+                <div className="rounded-2xl border border-claude-border bg-claude-bg px-4 py-4">
+                  <div className="text-[12px] text-claude-textSecondary">{isZh ? '第三步' : 'Step 3'}</div>
+                  <div className="mt-2 text-[14px] font-medium text-claude-text">{isZh ? '需要时再进入代码页确认细节' : 'Open Code only when needed'}</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-claude-border bg-claude-bg p-4">
+              <div className="text-[13px] font-medium text-claude-text">{isZh ? '最常用的三个入口' : 'Three common starting points'}</div>
+              <div className="mt-4 space-y-2">
+                <button
+                  type="button"
+                  onClick={() => openClaudePrompt(isZh ? '请先用普通人能看懂的话，告诉我当前项目是做什么的、主要有哪些页面、我下一步最值得改哪里。' : 'Explain this project in plain language and tell me what to change next.')}
+                  className="flex w-full items-start justify-between gap-3 rounded-2xl border border-claude-border px-4 py-4 text-left transition-colors hover:bg-claude-hover"
+                >
+                  <div>
+                    <div className="text-[14px] font-medium text-claude-text">{isZh ? '先让 Claude 看懂项目' : 'Let Claude understand the project'}</div>
+                    <div className="mt-1 text-[12px] leading-6 text-claude-textSecondary">{isZh ? '适合第一次接手项目，不知道从哪里开始。' : 'Best when you do not know where to start.'}</div>
+                  </div>
+                  <ArrowRight size={16} className="mt-1 shrink-0 text-claude-textSecondary" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigate('/code')}
+                  className="flex w-full items-start justify-between gap-3 rounded-2xl border border-claude-border px-4 py-4 text-left transition-colors hover:bg-claude-hover"
+                >
+                  <div>
+                    <div className="text-[14px] font-medium text-claude-text">{isZh ? '去代码页，让 Claude 帮你改' : 'Open Code and ask Claude to edit'}</div>
+                    <div className="mt-1 text-[12px] leading-6 text-claude-textSecondary">{isZh ? '适合已经知道要改哪个项目，但不想自己找文件。' : 'Best when you know the project but do not want to locate files manually.'}</div>
+                  </div>
+                  <ArrowRight size={16} className="mt-1 shrink-0 text-claude-textSecondary" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigate('/projects')}
+                  className="flex w-full items-start justify-between gap-3 rounded-2xl border border-claude-border px-4 py-4 text-left transition-colors hover:bg-claude-hover"
+                >
+                  <div>
+                    <div className="text-[14px] font-medium text-claude-text">{isZh ? '先回项目页确认上下文' : 'Return to Projects first'}</div>
+                    <div className="mt-1 text-[12px] leading-6 text-claude-textSecondary">{isZh ? '适合还没绑定项目文档、工作区或聊天的时候。' : 'Best when project docs, workspace, or chats still need setup.'}</div>
+                  </div>
+                  <ArrowRight size={16} className="mt-1 shrink-0 text-claude-textSecondary" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div className="grid grid-cols-5 gap-4">
           {summaryCards.map((card) => {
             const Icon = card.icon;
@@ -840,7 +914,7 @@ const CoworkPage = ({ desktopTabId }: CoworkPageProps) => {
                   )}
                 </div>
 
-                <div className="mt-4 truncate text-[11px] text-claude-textSecondary">
+                <div className="mt-4 break-all text-[11px] leading-5 text-claude-textSecondary">
                   {summary.workspacePath || (isZh ? '还没有绑定工作区' : 'No workspace linked yet')}
                 </div>
               </button>
@@ -958,7 +1032,7 @@ const CoworkPage = ({ desktopTabId }: CoworkPageProps) => {
               <div className="flex items-center gap-3">
                 <UsersRound size={18} className="text-claude-textSecondary" />
                 <h2 className="text-[17px] font-semibold text-claude-text">
-                  {isZh ? '浠诲姟鐪嬫澘' : 'Task board'}
+                  {isZh ? '任务看板' : 'Task board'}
                 </h2>
               </div>
               <p className="mt-2 text-[13px] leading-6 text-claude-textSecondary">
@@ -972,7 +1046,7 @@ const CoworkPage = ({ desktopTabId }: CoworkPageProps) => {
               onClick={resetBoardTasks}
               className="rounded-lg border border-claude-border px-3 py-1.5 text-[12px] text-claude-textSecondary hover:bg-claude-hover hover:text-claude-text"
             >
-              {isZh ? '閲嶇疆妯℃澘' : 'Reset'}
+              {isZh ? '重置模板' : 'Reset'}
             </button>
           </div>
 
@@ -1062,7 +1136,7 @@ const CoworkPage = ({ desktopTabId }: CoworkPageProps) => {
                     className="rounded-xl border border-claude-border bg-claude-bg px-4 py-4"
                   >
                     <div className="flex items-start justify-between gap-4">
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
                           {task.done ? (
                             <CheckCircle2 size={16} className="shrink-0 text-emerald-400" />
@@ -1071,7 +1145,7 @@ const CoworkPage = ({ desktopTabId }: CoworkPageProps) => {
                           )}
                           <div className="text-[14px] font-medium text-claude-text">{task.title}</div>
                         </div>
-                        <div className="mt-2 pl-6 text-[12px] leading-6 text-claude-textSecondary">
+                        <div className="mt-2 break-all pl-6 text-[12px] leading-6 text-claude-textSecondary">
                           {task.description}
                         </div>
                       </div>
@@ -1257,7 +1331,7 @@ const CoworkPage = ({ desktopTabId }: CoworkPageProps) => {
                 </div>
                 <div className="rounded-xl border border-claude-border bg-claude-bg px-4 py-3">
                   <div className="text-[12px] uppercase tracking-[0.08em] text-claude-textSecondary/80">
-                    {isZh ? '鎺ㄨ崘璺嚎' : 'Recommended path'}
+                    {isZh ? '推荐路线' : 'Recommended path'}
                   </div>
                   <div className="mt-1 text-claude-text">
                     {isZh

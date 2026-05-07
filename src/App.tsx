@@ -88,10 +88,16 @@ const DESKTOP_ACTIVE_TAB_STORAGE_KEY = 'desktop_workspace_active_tab_v1';
 
 const makeDesktopTabId = () => `desk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 
-const isDesktopWorkspacePath = (pathname: string) => pathname === '/' || pathname.startsWith('/chat/') || pathname === '/cowork' || pathname === '/code';
+const isDesktopWorkspacePath = (pathname: string) => (
+  pathname === '/'
+  || pathname.startsWith('/chat/')
+  || pathname === '/cowork'
+  || pathname === '/projects'
+  || pathname === '/code'
+);
 
 const getDesktopTabModeFromPath = (pathname: string): DesktopTabMode => {
-  if (pathname === '/cowork') return 'cowork';
+  if (pathname === '/cowork' || pathname === '/projects') return 'cowork';
   if (pathname === '/code') return 'code';
   return 'chat';
 };
@@ -396,14 +402,8 @@ const Layout = () => {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [newChatKey, setNewChatKey] = useState(0);
-  const [authChecked, setAuthChecked] = useState(true);
-  const [authValid, setAuthValid] = useState(() => {
-    // Electron + clawparrot mode without gateway key → need login. Other cases pass.
-    if (!(window as any).electronAPI?.isElectron) return true;
-    const mode = localStorage.getItem('user_mode');
-    const hasGatewayKey = !!(localStorage.getItem('ANTHROPIC_API_KEY') && localStorage.getItem('gateway_user'));
-    return !(mode === 'clawparrot' && !hasGatewayKey);
-  });
+  const [authChecked] = useState(true);
+  const [authValid] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
   const [showUpgrade, setShowUpgrade] = useState(false);
   const [showAppMenu, setShowAppMenu] = useState(false);
@@ -493,7 +493,7 @@ const Layout = () => {
   const [draggedDesktopTabId, setDraggedDesktopTabId] = useState<string | null>(null);
   const [dragOverDesktopTabId, setDragOverDesktopTabId] = useState<string | null>(null);
   const isCodeRoute = location.pathname === '/code';
-  const isCoworkRoute = location.pathname === '/cowork';
+  const isCoworkRoute = location.pathname === '/cowork' || location.pathname === '/projects';
   const isChatRoute = !isCodeRoute && !isCoworkRoute;
   const currentDesktopTabId = useMemo(() => new URLSearchParams(location.search).get('tab') || '', [location.search]);
   const visibleDesktopTabs = useMemo(() => sortDesktopTabsForDisplay(desktopTabs), [desktopTabs]);
@@ -875,17 +875,6 @@ const Layout = () => {
     // Intentionally empty: do not collapse left sidebar automatically
   }, [location.pathname]);
 
-  const isElectron = !!(window as any).electronAPI?.isElectron;
-  // Electron auth rule: clawparrot users must login before entering the main UI
-  // (登录页会提示去 clawparrot.com 注册, 也提供"跳过登录"按钮切到 selfhosted).
-  // selfhosted users skip the login page entirely.
-  useEffect(() => {
-    if (!isElectron) return;
-    const mode = localStorage.getItem('user_mode');
-    const hasGatewayKey = !!(localStorage.getItem('ANTHROPIC_API_KEY') && localStorage.getItem('gateway_user'));
-    setAuthValid(!(mode === 'clawparrot' && !hasGatewayKey));
-  }, [isElectron]);
-
   const loadUnreadAnnouncements = useCallback(async () => {
     try {
       const data = await getUnreadAnnouncements();
@@ -1051,12 +1040,6 @@ const Layout = () => {
   if (showOnboarding) {
     return <Onboarding onComplete={() => {
       setShowOnboarding(false);
-      if (!isElectron) { setAuthValid(true); return; }
-      // clawparrot users go straight to /login (Onboarding also opens clawparrot.com
-      // in the browser so they can register). selfhosted users enter the main UI.
-      const mode = localStorage.getItem('user_mode');
-      const hasGatewayKey = !!(localStorage.getItem('ANTHROPIC_API_KEY') && localStorage.getItem('gateway_user'));
-      setAuthValid(!(mode === 'clawparrot' && !hasGatewayKey));
     }} />;
   }
 
@@ -1413,9 +1396,35 @@ const Layout = () => {
                   window.location.hash = '#/';
                 }} />
               ) : location.pathname === '/projects' ? (
-                <ProjectsPage />
+                <PageErrorBoundary
+                  fallback={(
+                    <div className="flex h-full items-center justify-center bg-claude-bg px-6">
+                      <div className="max-w-[520px] rounded-2xl border border-claude-border bg-claude-input px-6 py-5 text-center shadow-xl">
+                        <div className="text-[18px] font-semibold text-claude-text">Projects 页面加载失败</div>
+                        <div className="mt-2 text-[13px] leading-6 text-claude-textSecondary">
+                          项目工作区遇到了渲染错误。现在已经加了兜底保护，你可以先返回协作页，或刷新后重试。
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                >
+                  <ProjectsPage />
+                </PageErrorBoundary>
               ) : location.pathname === '/cowork' ? (
-                <CoworkPage key={`cowork-${currentDesktopTabId || 'default'}`} desktopTabId={currentDesktopTabId || activeDesktopTabId || undefined} />
+                <PageErrorBoundary
+                  fallback={(
+                    <div className="flex h-full items-center justify-center bg-claude-bg px-6">
+                      <div className="max-w-[520px] rounded-2xl border border-claude-border bg-claude-input px-6 py-5 text-center shadow-xl">
+                        <div className="text-[18px] font-semibold text-claude-text">Cowork 页面加载失败</div>
+                        <div className="mt-2 text-[13px] leading-6 text-claude-textSecondary">
+                          协作工作区遇到了渲染错误。现在已经加了兜底保护，你可以先返回聊天，或刷新后重试。
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                >
+                  <CoworkPage key={`cowork-${currentDesktopTabId || 'default'}`} desktopTabId={currentDesktopTabId || activeDesktopTabId || undefined} />
+                </PageErrorBoundary>
               ) : location.pathname === '/code' ? (
                 <PageErrorBoundary
                   fallback={(
